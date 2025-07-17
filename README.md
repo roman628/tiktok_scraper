@@ -5,6 +5,12 @@ Enhanced TikTok video downloader with metadata extraction, transcription, and ba
 ## Installation
 
 ```bash
+python -m venv venv
+pip install -r requirements.txt
+```
+
+or
+```bash
 pip install yt-dlp faster-whisper numpy
 ```
 
