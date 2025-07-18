@@ -655,6 +655,7 @@ def process_from_file(file_path, **kwargs):
     
     print(f"🔄 Processing {len(urls)} URLs from {file_path}")
     results = []
+    batch_metadata = []  # Store metadata for batch processing
     
     for i, url in enumerate(urls, 1):
         print(f"\n{'='*50}")
@@ -666,10 +667,49 @@ def process_from_file(file_path, **kwargs):
         
         if result['success']:
             print(f"✅ {i}/{len(urls)} completed successfully")
+            batch_metadata.append(result['metadata'])
         else:
             print(f"❌ {i}/{len(urls)} failed: {result.get('error', 'Unknown error')}")
+        
+        # Auto-append to master2.json every 10 successful downloads
+        if len(batch_metadata) >= 10:
+            print(f"\n💾 Auto-saving batch of {len(batch_metadata)} videos to master2.json...")
+            append_batch_to_master_json(batch_metadata, "master2.json")
+            batch_metadata = []  # Reset batch
+    
+    # Save any remaining metadata at the end
+    if batch_metadata:
+        print(f"\n💾 Saving final batch of {len(batch_metadata)} videos to master2.json...")
+        append_batch_to_master_json(batch_metadata, "master2.json")
     
     return results
+
+
+def append_batch_to_master_json(metadata_list, master_file_path):
+    """Append batch of metadata to master JSON file"""
+    master_path = Path(master_file_path)
+    
+    # Load existing data or create new list
+    if master_path.exists():
+        try:
+            with open(master_path, 'r', encoding='utf-8') as f:
+                master_data = json.load(f)
+            if not isinstance(master_data, list):
+                master_data = [master_data]  # Convert single object to list
+        except json.JSONDecodeError:
+            print(f"⚠️  Invalid JSON in {master_path}, creating new file")
+            master_data = []
+    else:
+        master_data = []
+    
+    # Append new metadata batch
+    master_data.extend(metadata_list)
+    
+    # Save updated data
+    with open(master_path, 'w', encoding='utf-8') as f:
+        json.dump(master_data, f, indent=2, ensure_ascii=False)
+    
+    print(f"📎 Appended batch to master file: {master_path} (+{len(metadata_list)} videos, total: {len(master_data)} videos)")
 
 
 def append_to_master_json(metadata, master_file_path):
