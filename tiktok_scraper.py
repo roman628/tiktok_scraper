@@ -23,6 +23,13 @@ except ImportError:
     print("Install it with: pip install yt-dlp")
     sys.exit(1)
 
+try:
+    from comment_scraper import scrape_tiktok_comments
+except ImportError:
+    print("⚠️  Comment scraper not available. Comments will not be extracted.")
+    def scrape_tiktok_comments(url, max_comments=5):
+        return []
+
 
 def get_platform_info():
     """Get platform-specific information"""
@@ -393,7 +400,7 @@ def extract_subtitles_text(info_dict):
     return subtitle_text.strip()
 
 
-def extract_metadata(info_dict):
+def extract_metadata(info_dict, url=None, scrape_comments=False):
     """Extract and organize metadata from yt-dlp info dictionary"""
     
     # Extract subtitle text
@@ -440,13 +447,27 @@ def extract_metadata(info_dict):
         "transcription_timestamp": "",
         
         # Comments (yt-dlp limitation - usually empty for TikTok)
-        "top_comments": [],  # Would need web scraping to populate
+        "top_comments": [],  # Will be populated by web scraping if enabled
         
         # Download metadata
         "downloaded_at": datetime.now().isoformat(),
         "downloaded_with": f"Enhanced TikTok Downloader v2.1 ({platform.system()})",
         "platform": platform.system()
     }
+    
+    # Scrape comments if enabled and URL is provided
+    if scrape_comments and url:
+        try:
+            print("🔍 Scraping comments...")
+            comments = scrape_tiktok_comments(url, 10)
+            metadata["top_comments"] = comments
+            if comments:
+                print(f"✅ Successfully scraped {len(comments)} comments")
+            else:
+                print("⚠️  No comments scraped")
+        except Exception as e:
+            print(f"❌ Error scraping comments: {e}")
+            metadata["top_comments"] = []
     
     return metadata
 
@@ -505,7 +526,7 @@ def transcribe_with_whisper(video_path, whisper_model, device_type):
 
 
 def download_tiktok_video(url, output_dir="downloads", quality="best", audio_only=False, 
-                         use_whisper=False, whisper_model=None, whisper_device="CPU"):
+                         use_whisper=False, whisper_model=None, whisper_device="CPU", scrape_comments=False):
     """
     Download a TikTok video with comprehensive metadata extraction
     """
@@ -532,7 +553,7 @@ def download_tiktok_video(url, output_dir="downloads", quality="best", audio_onl
             info = ydl.extract_info(url, download=False)
             
         # Extract metadata
-        metadata = extract_metadata(info)
+        metadata = extract_metadata(info, url, scrape_comments)
         
         # Create folder name from video title
         folder_name = sanitize_filename(metadata['title'])
@@ -710,6 +731,8 @@ def main():
                        help="Use faster-whisper for additional transcription")
     parser.add_argument("--force-cpu", action="store_true",
                        help="Force CPU mode for whisper (bypass GPU issues)")
+    parser.add_argument("--scrape-comments", action="store_true",
+                       help="Scrape top 5 comments from TikTok videos")
     parser.add_argument("--diagnose", action="store_true",
                        help="Diagnose CUDA environment and exit")
     parser.add_argument("--from-file", "-ff", type=str,
@@ -753,7 +776,8 @@ def main():
         'audio_only': args.mp3,
         'use_whisper': args.whisper,
         'whisper_model': whisper_model,
-        'whisper_device': whisper_device
+        'whisper_device': whisper_device,
+        'scrape_comments': args.scrape_comments
     }
     
     # Process videos
@@ -828,6 +852,9 @@ if __name__ == "__main__":
         use_whisper = input("Use faster-whisper transcription? (y/n, press Enter for 'n'): ").strip().lower()
         use_whisper = use_whisper in ['y', 'yes', '1', 'true']
         
+        scrape_comments = input("Scrape top 5 comments? (y/n, press Enter for 'n'): ").strip().lower()
+        scrape_comments = scrape_comments in ['y', 'yes', '1', 'true']
+        
         whisper_model = None
         whisper_device = "CPU"
         if use_whisper:
@@ -838,7 +865,7 @@ if __name__ == "__main__":
             else:
                 use_whisper = False
         
-        result = download_tiktok_video(url, output_dir, quality, audio_only, use_whisper, whisper_model, whisper_device)
+        result = download_tiktok_video(url, output_dir, quality, audio_only, use_whisper, whisper_model, whisper_device, scrape_comments)
         if result['success']:
             print(f"\n🎉 Download completed successfully!")
             print(f"📁 Files saved to: {result['folder']}")
