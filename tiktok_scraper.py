@@ -36,6 +36,13 @@ except ImportError:
     print("Install it with: pip install yt-dlp")
     sys.exit(1)
 
+# Try to import faster-whisper
+try:
+    from faster_whisper import WhisperModel
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
+
 # Global variables for graceful shutdown
 shutdown_requested = False
 lock = threading.Lock()
@@ -56,7 +63,139 @@ if platform.system() != 'Windows':
     signal.signal(signal.SIGTERM, signal_handler)
 
 
-def get_memory_usage():
+def get_platform_info():
+    """Get platform-specific information"""
+    system = platform.system().lower()
+    return {
+        'system': system,
+        'is_windows': system == 'windows',
+        'is_mac': system == 'darwin',
+        'is_linux': system == 'linux',
+        'path_sep': ';' if system == 'windows' else ':',
+        'exe_ext': '.exe' if system == 'windows' else ''
+    }
+
+
+def find_venv_path():
+    """Dynamically find the virtual environment path"""
+    if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
+        return sys.prefix
+    return None
+
+
+def find_nvidia_libraries():
+    """Find NVIDIA CUDA libraries across different platforms"""
+    platform_info = get_platform_info()
+    possible_locations = []
+    
+    venv_path = find_venv_path()
+    if venv_path:
+        if platform_info['is_windows']:
+            venv_site_packages = os.path.join(venv_path, "Lib", "site-packages")
+        else:
+            for path in site.getsitepackages():
+                if venv_path in path:
+                    venv_site_packages = path
+                    break
+            else:
+                python_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+                venv_site_packages = os.path.join(venv_path, "lib", python_version, "site-packages")
+        
+        nvidia_venv_path = os.path.join(venv_site_packages, "nvidia")
+        if os.path.exists(nvidia_venv_path):
+            possible_locations.append(("VENV", nvidia_venv_path))
+    
+    for site_path in site.getsitepackages():
+        nvidia_path = os.path.join(site_path, "nvidia")
+        if os.path.exists(nvidia_path):
+            possible_locations.append(("SYSTEM", nvidia_path))
+    
+    return possible_locations
+
+
+def setup_cuda_paths():
+    """Set up CUDA paths for faster-whisper"""
+    platform_info = get_platform_info()
+    nvidia_locations = find_nvidia_libraries()
+    
+    cuda_paths = []
+    
+    for location_type, base_path in nvidia_locations:
+        if "nvidia" in base_path:
+            potential_subdirs = ["cublas", "cudnn", "cufft", "curand", "cusparse"]
+            for subdir in potential_subdirs:
+                if platform_info['is_windows']:
+                    lib_path = os.path.join(base_path, subdir, "bin")
+                else:
+                    lib_path = os.path.join(base_path, subdir, "lib")
+                
+                if os.path.exists(lib_path):
+                    cuda_paths.append(lib_path)
+    
+    if cuda_paths:
+        for cuda_path in cuda_paths:
+            if cuda_path not in os.environ.get('PATH', ''):
+                os.environ['PATH'] = cuda_path + platform_info['path_sep'] + os.environ.get('PATH', '')
+        
+        if not platform_info['is_windows']:
+            current_ld = os.environ.get('LD_LIBRARY_PATH', '')
+            for cuda_path in cuda_paths:
+                if cuda_path not in current_ld:
+                    if current_ld:
+                        os.environ['LD_LIBRARY_PATH'] = cuda_path + ':' + current_ld
+                    else:
+                        os.environ['LD_LIBRARY_PATH'] = cuda_path
+    
+    return cuda_paths
+
+
+def load_whisper_model(force_cpu=False):
+    """Load faster-whisper model for transcription"""
+    if not WHISPER_AVAILABLE:
+        print("❌ faster-whisper not available. Install with: pip install faster-whisper")
+        return None, None
+    
+    try:
+        if not force_cpu:
+            cuda_paths = setup_cuda_paths()
+            if cuda_paths:
+                print(f"✅ CUDA paths configured: {len(cuda_paths)} paths found")
+            
+            try:
+                print("🚀 Loading GPU whisper model...")
+                model = WhisperModel("small.en", device="cuda", compute_type="float16")
+                print("✅ GPU model loaded!")
+                return model, "GPU"
+            except Exception as e:
+                print(f"⚠️  GPU failed: {e}")
+                print("🔄 Falling back to CPU model...")
+        
+        model = WhisperModel("small.en", device="cpu", compute_type="int8")
+        print("✅ CPU model loaded!")
+        return model, "CPU"
+        
+    except Exception as e:
+        print(f"❌ Failed to load whisper model: {e}")
+        return None, None
+
+
+def transcribe_with_whisper(video_path, whisper_model, device_type):
+    """Transcribe video file using faster-whisper"""
+    try:
+        print(f"🎤 Transcribing with faster-whisper ({device_type})...")
+        segments, info = whisper_model.transcribe(video_path, beam_size=1, language="en")
+        
+        text_segments = []
+        for segment in segments:
+            if segment.text.strip():
+                text_segments.append(segment.text.strip())
+        
+        transcription = ' '.join(text_segments)
+        return transcription.strip()
+        
+    except Exception as e:
+        print(f"❌ Whisper transcription failed: {e}")
+        return ""
     """Get current memory usage in MB"""
     process = psutil.Process()
     return process.memory_info().rss / 1024 / 1024
@@ -149,7 +288,8 @@ def extract_metadata_minimal(info_dict):
     return metadata
 
 
-def download_single_video(url, output_dir="downloads", quality="best", audio_only=False):
+def download_single_video(url, output_dir="downloads", quality="best", audio_only=False, 
+                         use_whisper=False, whisper_model=None, whisper_device="CPU"):
     """Download a single TikTok video with memory optimization"""
     global shutdown_requested
     
@@ -208,6 +348,21 @@ def download_single_video(url, output_dir="downloads", quality="best", audio_onl
         # Download
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
+        
+        # Whisper transcription if requested
+        if use_whisper and whisper_model and not audio_only:
+            video_file = None
+            for file in video_folder.iterdir():
+                if file.suffix.lower() in ['.mp4', '.webm', '.mkv']:
+                    video_file = file
+                    break
+            
+            if video_file:
+                custom_transcription = transcribe_with_whisper(str(video_file), whisper_model, whisper_device)
+                if custom_transcription:
+                    metadata['custom_transcription'] = custom_transcription
+                    metadata['transcription_timestamp'] = datetime.now().isoformat()
+                    print(f"✅ Whisper transcription completed ({len(custom_transcription)} chars)")
         
         # Save metadata
         metadata_file = video_folder / "metadata.json"
@@ -354,10 +509,17 @@ def load_urls_from_file(file_path):
 
 def worker_process(args_tuple):
     """Worker function for multiprocessing"""
-    url, output_dir, quality, audio_only, append_file = args_tuple
+    url, output_dir, quality, audio_only, append_file, use_whisper, whisper_device = args_tuple
     
     try:
-        result = download_single_video(url, output_dir, quality, audio_only)
+        # Load whisper model in worker process if needed
+        whisper_model = None
+        if use_whisper and WHISPER_AVAILABLE:
+            whisper_model, actual_device = load_whisper_model(force_cpu=(whisper_device == "CPU"))
+            if whisper_model:
+                whisper_device = actual_device
+        
+        result = download_single_video(url, output_dir, quality, audio_only, use_whisper, whisper_model, whisper_device)
         
         if result['success'] and append_file:
             append_to_master_json(result['metadata'], append_file)
@@ -367,7 +529,8 @@ def worker_process(args_tuple):
         return {'success': False, 'error': str(e), 'url': url}
 
 
-def process_urls_multi(urls, output_dir, quality, audio_only, append_file, url_file, num_processes=10):
+def process_urls_multi(urls, output_dir, quality, audio_only, append_file, url_file, num_processes=10, 
+                      use_whisper=False, whisper_device="CPU"):
     """Process URLs using multiple processes"""
     global shutdown_requested
     
@@ -382,7 +545,7 @@ def process_urls_multi(urls, output_dir, quality, audio_only, append_file, url_f
     processed_count = 0
     
     # Prepare arguments for workers
-    worker_args = [(url, output_dir, quality, audio_only, append_file) for url in urls]
+    worker_args = [(url, output_dir, quality, audio_only, append_file, use_whisper, whisper_device) for url in urls]
     
     try:
         with ProcessPoolExecutor(max_workers=num_processes) as executor:
@@ -467,7 +630,7 @@ def process_urls_sequential(urls, output_dir, quality, audio_only, append_file, 
         mem_before = get_memory_usage()
         
         # Download video
-        result = download_single_video(url, output_dir, quality, audio_only)
+        result = download_single_video(url, output_dir, quality, audio_only, use_whisper, whisper_model, whisper_device)
         results.append(result)
         
         if result['success']:
@@ -521,6 +684,8 @@ def main():
     parser.add_argument("--from-file", "-ff", type=str, help="Process URLs from text file")
     parser.add_argument("--append", type=str, help="Append metadata to master JSON file (real-time)")
     parser.add_argument("--clean", action="store_true", help="Clean up individual folders after ALL processing")
+    parser.add_argument("--whisper", action="store_true", help="Use faster-whisper for transcription")
+    parser.add_argument("--force-cpu", action="store_true", help="Force CPU mode for whisper")
     parser.add_argument("--multi", action="store_true", help="Enable multi-process downloading (10 workers)")
     parser.add_argument("--processes", type=int, default=10, help="Number of worker processes (default: 10)")
     
@@ -567,19 +732,20 @@ def main():
         if args.multi:
             results = process_urls_multi(
                 urls_to_process, args.output, args.quality, args.mp3, 
-                args.append, args.from_file, args.processes
+                args.append, args.from_file, args.processes, args.whisper, whisper_device
             )
         else:
             results = process_urls_sequential(
                 urls_to_process, args.output, args.quality, args.mp3, 
-                args.append, args.from_file
+                args.append, args.from_file, args.whisper, whisper_model, whisper_device
             )
     else:
         # Single URL
         print("📱 Single URL mode")
         start_time = time.time()
         
-        result = download_single_video(args.url, args.output, args.quality, args.mp3)
+        result = download_single_video(args.url, args.output, args.quality, args.mp3, 
+                                     args.whisper, whisper_model, whisper_device)
         results = [result]
         
         if result['success'] and args.append:
