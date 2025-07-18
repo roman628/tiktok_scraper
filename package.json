@@ -1,0 +1,27 @@
+{
+  "name": "tiktok-url-collector",
+  "version": "1.0.0",
+  "description": "TikTok URL collector that gathers video URLs from hashtags, users, and trending",
+  "main": "url_collector.js",
+  "scripts": {
+    "start": "node url_collector.js",
+    "test": "node url_collector.js hashtag funny -c 10 -f all"
+  },
+  "keywords": [
+    "tiktok",
+    "scraper",
+    "url",
+    "video",
+    "download"
+  ],
+  "author": "TikTok Scraper",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^9.4.1",
+    "fs-extra": "^11.1.1",
+    "csv-writer": "^1.6.0",
+    "chalk": "^4.1.2",
+    "ora": "^5.4.1",
+    "puppeteer": "^21.0.0"
+  }
+}

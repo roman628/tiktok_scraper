@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
-Enhanced TikTok Video Downloader
-Downloads TikTok videos with comprehensive metadata extraction, batch processing, and transcription
-Cross-platform support: Windows, macOS, Linux
+Robust Multi-Process TikTok Video Downloader
+Features:
+- Resume capability (marks processed URLs with '-')
+- Graceful Ctrl+C handling
+- Real-time JSON appending
+- Multi-process downloading (--multi flag)
+- Comprehensive timing
+- Memory optimization
 """
 
 import os
@@ -11,10 +16,18 @@ import json
 import argparse
 import re
 import platform
+import gc
+import time
+import psutil
+import signal
+import threading
+import multiprocessing as mp
 from pathlib import Path
 from datetime import datetime
 import shutil
 import site
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import subprocess
 
 try:
     import yt_dlp
@@ -29,6 +42,32 @@ except ImportError:
     print("⚠️  Comment scraper not available. Comments will not be extracted.")
     def scrape_tiktok_comments(url, max_comments=5):
         return []
+
+# Try to import faster-whisper
+try:
+    from faster_whisper import WhisperModel
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
+
+# Global variables for graceful shutdown
+shutdown_requested = False
+lock = threading.Lock()
+
+def signal_handler(signum, frame):
+    """Handle Ctrl+C gracefully"""
+    global shutdown_requested
+    with lock:
+        if not shutdown_requested:
+            shutdown_requested = True
+            print(f"\n🛑 Graceful shutdown requested (signal {signum})")
+            print("⏳ Finishing current downloads and saving progress...")
+            print("🚫 Cleaning disabled to preserve progress")
+
+# Register signal handlers
+signal.signal(signal.SIGINT, signal_handler)
+if platform.system() != 'Windows':
+    signal.signal(signal.SIGTERM, signal_handler)
 
 
 def get_platform_info():
@@ -46,30 +85,26 @@ def get_platform_info():
 
 def find_venv_path():
     """Dynamically find the virtual environment path"""
-    # Check if we're in a virtual environment
     if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
         return sys.prefix
     return None
 
 
 def find_nvidia_libraries():
-    """Find NVIDIA CUDA libraries across different platforms and installation methods"""
+    """Find NVIDIA CUDA libraries across different platforms"""
     platform_info = get_platform_info()
     possible_locations = []
     
-    # Virtual environment paths (highest priority)
     venv_path = find_venv_path()
     if venv_path:
         if platform_info['is_windows']:
             venv_site_packages = os.path.join(venv_path, "Lib", "site-packages")
         else:
-            # Find the actual site-packages directory in venv
             for path in site.getsitepackages():
                 if venv_path in path:
                     venv_site_packages = path
                     break
             else:
-                # Fallback for virtual environments
                 python_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
                 venv_site_packages = os.path.join(venv_path, "lib", python_version, "site-packages")
         
@@ -77,52 +112,22 @@ def find_nvidia_libraries():
         if os.path.exists(nvidia_venv_path):
             possible_locations.append(("VENV", nvidia_venv_path))
     
-    # System-wide installation paths
     for site_path in site.getsitepackages():
         nvidia_path = os.path.join(site_path, "nvidia")
         if os.path.exists(nvidia_path):
             possible_locations.append(("SYSTEM", nvidia_path))
     
-    # User installation paths
-    user_site = site.getusersitepackages()
-    if user_site:
-        nvidia_user_path = os.path.join(user_site, "nvidia")
-        if os.path.exists(nvidia_user_path):
-            possible_locations.append(("USER", nvidia_user_path))
-    
-    # Platform-specific system locations
-    if platform_info['is_linux']:
-        linux_paths = [
-            "/usr/local/cuda/lib64",
-            "/usr/lib/x86_64-linux-gnu",
-            "/opt/cuda/lib64"
-        ]
-        for path in linux_paths:
-            if os.path.exists(path):
-                possible_locations.append(("SYSTEM_LINUX", path))
-    
-    elif platform_info['is_mac']:
-        mac_paths = [
-            "/usr/local/cuda/lib",
-            "/opt/homebrew/lib",
-            "/usr/local/lib"
-        ]
-        for path in mac_paths:
-            if os.path.exists(path):
-                possible_locations.append(("SYSTEM_MAC", path))
-    
     return possible_locations
 
 
 def setup_cuda_paths():
-    """Set up CUDA paths for faster-whisper across platforms"""
+    """Set up CUDA paths for faster-whisper"""
     platform_info = get_platform_info()
     nvidia_locations = find_nvidia_libraries()
     
     cuda_paths = []
     
     for location_type, base_path in nvidia_locations:
-        # For pip-installed nvidia packages
         if "nvidia" in base_path:
             potential_subdirs = ["cublas", "cudnn", "cufft", "curand", "cusparse"]
             for subdir in potential_subdirs:
@@ -133,29 +138,12 @@ def setup_cuda_paths():
                 
                 if os.path.exists(lib_path):
                     cuda_paths.append(lib_path)
-        else:
-            # For system-wide CUDA installations
-            if os.path.exists(base_path):
-                cuda_paths.append(base_path)
     
-    # Add paths to environment
     if cuda_paths:
-        current_path = os.environ.get('PATH', '')
-        if platform_info['is_windows']:
-            ld_var = 'PATH'
-            separator = ';'
-        else:
-            ld_var = 'LD_LIBRARY_PATH'
-            separator = ':'
-            # Also set PATH for some systems
-            current_ld = os.environ.get('LD_LIBRARY_PATH', '')
-        
-        # Update PATH
         for cuda_path in cuda_paths:
-            if cuda_path not in current_path:
-                os.environ['PATH'] = cuda_path + platform_info['path_sep'] + os.environ['PATH']
+            if cuda_path not in os.environ.get('PATH', ''):
+                os.environ['PATH'] = cuda_path + platform_info['path_sep'] + os.environ.get('PATH', '')
         
-        # Update LD_LIBRARY_PATH on Unix systems
         if not platform_info['is_windows']:
             current_ld = os.environ.get('LD_LIBRARY_PATH', '')
             for cuda_path in cuda_paths:
@@ -170,11 +158,12 @@ def setup_cuda_paths():
 
 def load_whisper_model(force_cpu=False):
     """Load faster-whisper model for transcription"""
+    if not WHISPER_AVAILABLE:
+        print("❌ faster-whisper not available. Install with: pip install faster-whisper")
+        return None, None
+    
     try:
-        from faster_whisper import WhisperModel
-        
         if not force_cpu:
-            # Setup CUDA paths before trying GPU
             cuda_paths = setup_cuda_paths()
             if cuda_paths:
                 print(f"✅ CUDA paths configured: {len(cuda_paths)} paths found")
@@ -185,20 +174,19 @@ def load_whisper_model(force_cpu=False):
                 print("✅ GPU model loaded!")
                 return model, "GPU"
             except Exception as e:
-                print(f"⚠️  GPU failed during loading: {e}")
+                print(f"⚠️  GPU failed: {e}")
                 print("🔄 Falling back to CPU model...")
-        else:
-            print("🔄 Using CPU mode (forced)...")
         
         model = WhisperModel("small.en", device="cpu", compute_type="int8")
         print("✅ CPU model loaded!")
         return model, "CPU"
-            
-    except ImportError:
-        print("❌ faster-whisper not installed. Install with: pip install faster-whisper numpy")
+        
+    except Exception as e:
+        print(f"❌ Failed to load whisper model: {e}")
         return None, None
 
 
+<<<<<<< HEAD
 def diagnose_cuda_environment():
     """Diagnose CUDA environment for debugging across platforms"""
     platform_info = get_platform_info()
@@ -472,6 +460,8 @@ def extract_metadata(info_dict, url=None, scrape_comments=False):
     return metadata
 
 
+=======
+>>>>>>> 984530b99fa9ef41e5b6c465ed5913baf6d9f5e4
 def transcribe_with_whisper(video_path, whisper_model, device_type):
     """Transcribe video file using faster-whisper"""
     try:
@@ -487,44 +477,11 @@ def transcribe_with_whisper(video_path, whisper_model, device_type):
         return transcription.strip()
         
     except Exception as e:
-        error_msg = str(e).lower()
-        print(f"❌ Whisper transcription failed on {device_type}: {e}")
-        
-        # Check for specific GPU-related errors that indicate we should fallback
-        gpu_errors = [
-            'cudnn', 'cuda', 'gpu', 'invalid handle', 'cannot load symbol',
-            'could not locate', 'dll', 'library', 'device', 'out of memory'
-        ]
-        
-        is_gpu_error = any(gpu_keyword in error_msg for gpu_keyword in gpu_errors)
-        
-        # If GPU failed with GPU-related error, try CPU fallback
-        if device_type == "GPU" and is_gpu_error:
-            print("🔄 GPU error detected, attempting CPU fallback...")
-            try:
-                from faster_whisper import WhisperModel
-                print("📥 Loading CPU fallback model...")
-                cpu_model = WhisperModel("small.en", device="cpu", compute_type="int8")
-                print("✅ CPU fallback model loaded!")
-                
-                print("🎤 Transcribing with CPU fallback...")
-                segments, info = cpu_model.transcribe(video_path, beam_size=1, language="en")
-                text_segments = []
-                for segment in segments:
-                    if segment.text.strip():
-                        text_segments.append(segment.text.strip())
-                
-                transcription = ' '.join(text_segments)
-                print("✅ CPU fallback transcription completed!")
-                return transcription.strip()
-                
-            except Exception as cpu_error:
-                print(f"❌ CPU fallback also failed: {cpu_error}")
-                return ""
-        
+        print(f"❌ Whisper transcription failed: {e}")
         return ""
 
 
+<<<<<<< HEAD
 def download_tiktok_video(url, output_dir="downloads", quality="best", audio_only=False, 
                          use_whisper=False, whisper_model=None, whisper_device="CPU", scrape_comments=False):
     """
@@ -554,56 +511,165 @@ def download_tiktok_video(url, output_dir="downloads", quality="best", audio_onl
             
         # Extract metadata
         metadata = extract_metadata(info, url, scrape_comments)
+=======
+def get_memory_usage():
+    """Get current memory usage in MB"""
+    process = psutil.Process()
+    return process.memory_info().rss / 1024 / 1024
+
+
+def cleanup_memory():
+    """Force garbage collection and memory cleanup"""
+    gc.collect()
+    time.sleep(0.1)
+
+
+def kill_browser_processes():
+    """Kill only browser processes spawned by yt-dlp (our child processes)"""
+    current_pid = os.getpid()
+    our_children = set()
+    
+    try:
+        # Get all our direct children first
+        current_process = psutil.Process(current_pid)
+        for child in current_process.children(recursive=True):
+            our_children.add(child.pid)
+>>>>>>> 984530b99fa9ef41e5b6c465ed5913baf6d9f5e4
         
-        # Create folder name from video title
-        folder_name = sanitize_filename(metadata['title'])
-        video_folder = Path(output_dir) / folder_name
-        video_folder.mkdir(parents=True, exist_ok=True)
+        # Only kill browser processes that are our descendants
+        for proc in psutil.process_iter(['pid', 'name', 'ppid']):
+            try:
+                proc_info = proc.info
+                proc_name = proc_info['name'].lower()
+                
+                # Check if it's a browser process AND one of our children
+                if (any(browser in proc_name for browser in ['chromium', 'chrome', 'firefox', 'edge']) and
+                    proc_info['pid'] in our_children):
+                    
+                    print(f"🧹 Cleaning up yt-dlp browser process: {proc_name} (PID: {proc_info['pid']})")
+                    proc.kill()
+                    
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+                
+    except Exception as e:
+        # If we can't safely identify our children, don't kill anything
+        print(f"⚠️  Skipping browser cleanup due to error: {e}")
+        pass
+
+
+def sanitize_filename(filename):
+    """Sanitize filename for filesystem compatibility"""
+    if platform.system() == 'Windows':
+        invalid_chars = r'[<>:"/\\|?*]'
+    else:
+        invalid_chars = r'[/]'
+    
+    filename = re.sub(invalid_chars, '_', filename)
+    filename = re.sub(r'\s+', ' ', filename).strip()
+    filename = filename.strip('.')
+    
+    max_length = 200 if platform.system() == 'Windows' else 255
+    if len(filename) > max_length:
+        filename = filename[:max_length]
+    
+    return filename
+
+
+def extract_metadata_minimal(info_dict):
+    """Extract minimal metadata to save memory"""
+    metadata = {
+        "title": info_dict.get('title', 'Unknown'),
+        "description": info_dict.get('description', ''),
+        "duration": info_dict.get('duration', 0),
+        "video_id": info_dict.get('id', ''),
+        "url": info_dict.get('webpage_url', ''),
+        "uploader": info_dict.get('uploader', 'Unknown'),
+        "uploader_id": info_dict.get('uploader_id', ''),
+        "uploader_url": info_dict.get('uploader_url', ''),
+        "view_count": info_dict.get('view_count', 0),
+        "like_count": info_dict.get('like_count', 0),
+        "comment_count": info_dict.get('comment_count', 0),
+        "repost_count": info_dict.get('repost_count', 0),
+        "hashtags": info_dict.get('tags', []),
+        "upload_date": info_dict.get('upload_date', ''),
+        "timestamp": info_dict.get('timestamp', 0),
+        "width": info_dict.get('width', 0),
+        "height": info_dict.get('height', 0),
+        "fps": info_dict.get('fps', 0),
+        "filesize": info_dict.get('filesize', 0),
+        "format": info_dict.get('format', ''),
+        "downloaded_at": datetime.now().isoformat(),
+        "downloaded_with": f"Robust TikTok Scraper v3.0 ({platform.system()})",
+        "platform": platform.system()
+    }
+    return metadata
+
+
+def download_single_video(url, output_dir="downloads", quality="best", audio_only=False, 
+                         use_whisper=False, whisper_model=None, whisper_device="CPU"):
+    """Download a single TikTok video with memory optimization"""
+    global shutdown_requested
+    
+    if shutdown_requested:
+        return {'success': False, 'error': 'Shutdown requested', 'url': url}
+    
+    try:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
         
-        print(f"📁 Created folder: {folder_name}")
-        print(f"📊 Video Info:")
-        print(f"   Title: {metadata['title']}")
-        print(f"   Creator: @{metadata['uploader']}")
-        print(f"   Duration: {metadata['duration']} seconds")
-        print(f"   Views: {metadata['view_count']:,}")
-        print(f"   Likes: {metadata['like_count']:,}")
-        print(f"   Comments: {metadata['comment_count']:,}")
-        
-        if metadata['subtitle_transcription']:
-            print(f"   Subtitles: Found ({len(metadata['subtitle_transcription'])} chars)")
-        
-        # Configure yt-dlp options for actual download
-        ydl_opts = {
-            'outtmpl': str(video_folder / f"{folder_name}.%(ext)s"),
-            'noplaylist': True,
-            'writesubtitles': True,
-            'writeautomaticsub': True,
+        # Memory-optimized yt-dlp options
+        temp_ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'writesubtitles': False,  # Skip to save memory
+            'writeautomaticsub': False,
+            'socket_timeout': 30,
+            'retries': 2,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         }
         
-        # Configure format and post-processing based on audio_only flag
+        # Extract info
+        with yt_dlp.YoutubeDL(temp_ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        
+        metadata = extract_metadata_minimal(info)
+        
+        # Create output folder
+        folder_name = sanitize_filename(metadata['title'])[:100]
+        video_folder = Path(output_dir) / folder_name
+        video_folder.mkdir(parents=True, exist_ok=True)
+        
+        # Configure download options
+        ydl_opts = {
+            'outtmpl': str(video_folder / f"{folder_name}.%(ext)s"),
+            'noplaylist': True,
+            'writesubtitles': False,
+            'writeautomaticsub': False,
+            'socket_timeout': 30,
+            'retries': 1,
+            'http_headers': temp_ydl_opts['http_headers'],
+        }
+        
         if audio_only:
             ydl_opts['format'] = 'bestaudio/best'
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '192',
+                'preferredquality': '128',
             }]
-            print("🎵 Mode: Audio-only (MP3)")
         else:
             ydl_opts['format'] = quality
-            print("🎬 Mode: Video download")
         
-        # Download the video/audio
-        print("⬇️  Starting download...")
+        # Download
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
         
-        # Find the downloaded video file for whisper transcription
-        video_file = None
+        # Whisper transcription if requested
         if use_whisper and whisper_model and not audio_only:
+            video_file = None
             for file in video_folder.iterdir():
                 if file.suffix.lower() in ['.mp4', '.webm', '.mkv']:
                     video_file = file
@@ -616,43 +682,180 @@ def download_tiktok_video(url, output_dir="downloads", quality="best", audio_onl
                     metadata['transcription_timestamp'] = datetime.now().isoformat()
                     print(f"✅ Whisper transcription completed ({len(custom_transcription)} chars)")
         
-        # Save metadata to JSON file
+        # Save metadata
         metadata_file = video_folder / "metadata.json"
         with open(metadata_file, 'w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
         
-        print(f"✅ Successfully downloaded {'audio' if audio_only else 'video'}: {metadata['title']}")
-        print(f"📄 Metadata saved to: {metadata_file}")
-        print(f"📂 All files saved in: {video_folder}")
+        # Cleanup
+        cleanup_memory()
+        kill_browser_processes()
         
         return {
             'success': True,
             'folder': str(video_folder),
             'metadata': metadata,
-            'metadata_file': str(metadata_file)
+            'metadata_file': str(metadata_file),
+            'url': url
         }
         
-    except yt_dlp.utils.DownloadError as e:
-        print(f"❌ Download error: {e}")
-        return {'success': False, 'error': str(e)}
     except Exception as e:
-        print(f"❌ Unexpected error: {e}")
-        return {'success': False, 'error': str(e)}
+        cleanup_memory()
+        kill_browser_processes()
+        return {'success': False, 'error': str(e), 'url': url}
 
 
-def process_from_file(file_path, **kwargs):
-    """Process multiple URLs from a text file"""
+def mark_url_processed(file_path, url):
+    """Mark URL as processed by adding '-' prefix"""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            for line in lines:
+                stripped = line.strip()
+                if stripped == url:
+                    f.write(f"-{line}")
+                else:
+                    f.write(line)
+        
+        return True
+    except Exception as e:
+        print(f"❌ Failed to mark URL as processed: {e}")
+        return False
+
+
+def append_to_master_json(metadata, master_file_path):
+    """Thread-safe append to master JSON file"""
+    try:
+        master_path = Path(master_file_path)
+        
+        # Use file locking for thread safety
+        lock_file = Path(f"{master_file_path}.lock")
+        
+        # Wait for lock
+        while lock_file.exists():
+            time.sleep(0.1)
+        
+        # Create lock
+        lock_file.touch()
+        
+        try:
+            # Load existing data
+            if master_path.exists():
+                try:
+                    with open(master_path, 'r', encoding='utf-8') as f:
+                        master_data = json.load(f)
+                    if not isinstance(master_data, list):
+                        master_data = [master_data]
+                except json.JSONDecodeError:
+                    master_data = []
+            else:
+                master_data = []
+            
+            # Append new metadata
+            master_data.append(metadata)
+            
+            # Save updated data
+            with open(master_path, 'w', encoding='utf-8') as f:
+                json.dump(master_data, f, indent=2, ensure_ascii=False)
+            
+            print(f"📎 Appended to {master_path.name} (total: {len(master_data)} videos)")
+            
+        finally:
+            # Remove lock
+            if lock_file.exists():
+                lock_file.unlink()
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Failed to append to master JSON: {e}")
+        if lock_file.exists():
+            lock_file.unlink()
+        return False
+
+
+def get_existing_urls(output_dir):
+    """Scan existing downloads and get processed URLs"""
+    existing_urls = set()
+    downloads_path = Path(output_dir)
+    
+    if not downloads_path.exists():
+        return existing_urls
+    
+    print("🔍 Scanning existing downloads...")
+    
+    for folder in downloads_path.iterdir():
+        if folder.is_dir():
+            metadata_file = folder / "metadata.json"
+            if metadata_file.exists():
+                try:
+                    with open(metadata_file, 'r', encoding='utf-8') as f:
+                        metadata = json.load(f)
+                    url = metadata.get('url', '')
+                    if url:
+                        existing_urls.add(url)
+                except Exception as e:
+                    print(f"⚠️  Failed to read {metadata_file}: {e}")
+    
+    print(f"✅ Found {len(existing_urls)} existing downloads")
+    return existing_urls
+
+
+def load_urls_from_file(file_path):
+    """Load URLs from file, excluding those marked as processed"""
     if not os.path.exists(file_path):
         print(f"❌ File not found: {file_path}")
-        return []
+        return [], []
     
     with open(file_path, 'r', encoding='utf-8') as f:
-        urls = [line.strip() for line in f if line.strip() and 'tiktok.com' in line]
+        lines = [line.strip() for line in f if line.strip()]
+    
+    unprocessed_urls = []
+    processed_urls = []
+    
+    for line in lines:
+        if line.startswith('-') and 'tiktok.com' in line[1:]:
+            processed_urls.append(line[1:])  # Remove the '-' prefix
+        elif 'tiktok.com' in line and not line.startswith('-'):
+            unprocessed_urls.append(line)
+    
+    print(f"📋 File contains {len(unprocessed_urls)} unprocessed and {len(processed_urls)} processed URLs")
+    return unprocessed_urls, processed_urls
+
+
+def worker_process(args_tuple):
+    """Worker function for multiprocessing"""
+    url, output_dir, quality, audio_only, append_file, use_whisper, whisper_device = args_tuple
+    
+    try:
+        # Load whisper model in worker process if needed
+        whisper_model = None
+        if use_whisper and WHISPER_AVAILABLE:
+            whisper_model, actual_device = load_whisper_model(force_cpu=(whisper_device == "CPU"))
+            if whisper_model:
+                whisper_device = actual_device
+        
+        result = download_single_video(url, output_dir, quality, audio_only, use_whisper, whisper_model, whisper_device)
+        
+        if result['success'] and append_file:
+            append_to_master_json(result['metadata'], append_file)
+        
+        return result
+    except Exception as e:
+        return {'success': False, 'error': str(e), 'url': url}
+
+
+def process_urls_multi(urls, output_dir, quality, audio_only, append_file, url_file, num_processes=10, 
+                      use_whisper=False, whisper_device="CPU"):
+    """Process URLs using multiple processes"""
+    global shutdown_requested
     
     if not urls:
-        print("❌ No valid TikTok URLs found in file")
         return []
     
+<<<<<<< HEAD
     print(f"🔄 Processing {len(urls)} URLs from {file_path}")
     results = []
     batch_metadata = []  # Store metadata for batch processing
@@ -681,10 +884,81 @@ def process_from_file(file_path, **kwargs):
     if batch_metadata:
         print(f"\n💾 Saving final batch of {len(batch_metadata)} videos to master2.json...")
         append_batch_to_master_json(batch_metadata, "master2.json")
+=======
+    print(f"🚀 Starting multi-process download with {num_processes} workers")
+    print(f"📊 Processing {len(urls)} URLs")
+    
+    start_time = time.time()
+    results = []
+    processed_count = 0
+    
+    # Prepare arguments for workers
+    worker_args = [(url, output_dir, quality, audio_only, append_file, use_whisper, whisper_device) for url in urls]
+    
+    try:
+        with ProcessPoolExecutor(max_workers=num_processes) as executor:
+            # Submit all jobs
+            future_to_url = {
+                executor.submit(worker_process, args): args[0] 
+                for args in worker_args
+            }
+            
+            # Process completed jobs
+            for future in as_completed(future_to_url):
+                if shutdown_requested:
+                    print("🛑 Cancelling remaining downloads...")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+                
+                url = future_to_url[future]
+                
+                try:
+                    result = future.result(timeout=300)  # 5-minute timeout per video
+                    results.append(result)
+                    processed_count += 1
+                    
+                    if result['success']:
+                        # Mark URL as processed
+                        if url_file:
+                            mark_url_processed(url_file, url)
+                        
+                        print(f"✅ [{processed_count}/{len(urls)}] {result['metadata']['title'][:50]}...")
+                    else:
+                        print(f"❌ [{processed_count}/{len(urls)}] Failed: {result.get('error', 'Unknown error')}")
+                        
+                        # Still mark as processed (attempted)
+                        if url_file:
+                            mark_url_processed(url_file, url)
+                
+                except Exception as e:
+                    print(f"❌ [{processed_count + 1}/{len(urls)}] Worker error: {e}")
+                    results.append({'success': False, 'error': str(e), 'url': url})
+                    processed_count += 1
+                    
+                    # Mark as processed (attempted)
+                    if url_file:
+                        mark_url_processed(url_file, url)
+    
+    except KeyboardInterrupt:
+        print("🛑 Multi-process interrupted")
+        shutdown_requested = True
+    
+    end_time = time.time()
+    duration = end_time - start_time
+    
+    successful = sum(1 for r in results if r.get('success', False))
+    
+    print(f"\n⏱️  Multi-process timing:")
+    print(f"   Total time: {duration:.2f} seconds ({duration/60:.1f} minutes)")
+    print(f"   Videos processed: {processed_count}/{len(urls)}")
+    print(f"   Successful downloads: {successful}")
+    print(f"   Average time per video: {duration/max(processed_count, 1):.2f} seconds")
+>>>>>>> 984530b99fa9ef41e5b6c465ed5913baf6d9f5e4
     
     return results
 
 
+<<<<<<< HEAD
 def append_batch_to_master_json(metadata_list, master_file_path):
     """Append batch of metadata to master JSON file"""
     master_path = Path(master_file_path)
@@ -715,51 +989,78 @@ def append_batch_to_master_json(metadata_list, master_file_path):
 def append_to_master_json(metadata, master_file_path):
     """Append metadata to master JSON file"""
     master_path = Path(master_file_path)
+=======
+def process_urls_sequential(urls, output_dir, quality, audio_only, append_file, url_file, use_whisper=False, whisper_model=None, whisper_device="CPU"):
+    """Process URLs sequentially"""
+    global shutdown_requested
+>>>>>>> 984530b99fa9ef41e5b6c465ed5913baf6d9f5e4
     
-    # Load existing data or create new list
-    if master_path.exists():
-        try:
-            with open(master_path, 'r', encoding='utf-8') as f:
-                master_data = json.load(f)
-            if not isinstance(master_data, list):
-                master_data = [master_data]  # Convert single object to list
-        except json.JSONDecodeError:
-            print(f"⚠️  Invalid JSON in {master_path}, creating new file")
-            master_data = []
-    else:
-        master_data = []
+    if not urls:
+        return []
     
-    # Append new metadata
-    master_data.append(metadata)
+    print(f"🔄 Processing {len(urls)} URLs sequentially")
     
-    # Save updated data
-    with open(master_path, 'w', encoding='utf-8') as f:
-        json.dump(master_data, f, indent=2, ensure_ascii=False)
+    start_time = time.time()
+    results = []
     
-    print(f"📎 Appended to master file: {master_path} (total: {len(master_data)} videos)")
-
-
-def cleanup_folders(results, output_dir):
-    """Clean up individual video folders after processing"""
-    cleaned_count = 0
+    for i, url in enumerate(urls, 1):
+        if shutdown_requested:
+            print(f"🛑 Stopping at {i-1}/{len(urls)} due to shutdown request")
+            break
+        
+        print(f"\n[{i}/{len(urls)}] Processing: {url}")
+        mem_before = get_memory_usage()
+        
+        # Download video
+        result = download_single_video(url, output_dir, quality, audio_only, use_whisper, whisper_model, whisper_device)
+        results.append(result)
+        
+        if result['success']:
+            # Append to master JSON if requested
+            if append_file:
+                append_to_master_json(result['metadata'], append_file)
+            
+            # Mark URL as processed
+            if url_file:
+                mark_url_processed(url_file, url)
+            
+            print(f"✅ [{i}/{len(urls)}] Success: {result['metadata']['title'][:50]}...")
+        else:
+            print(f"❌ [{i}/{len(urls)}] Failed: {result.get('error', 'Unknown error')}")
+            
+            # Still mark as processed (attempted)
+            if url_file:
+                mark_url_processed(url_file, url)
+        
+        # Memory monitoring
+        mem_after = get_memory_usage()
+        if mem_after > 8000:  # 8GB threshold
+            print(f"⚠️  High memory usage ({mem_after:.1f} MB), forcing cleanup...")
+            cleanup_memory()
+            kill_browser_processes()
+        
+        # Brief pause between downloads
+        time.sleep(1)
     
-    for result in results:
-        if result['success'] and 'folder' in result:
-            folder_path = Path(result['folder'])
-            if folder_path.exists():
-                try:
-                    shutil.rmtree(folder_path)
-                    cleaned_count += 1
-                    print(f"🗑️  Cleaned: {folder_path.name}")
-                except Exception as e:
-                    print(f"❌ Failed to clean {folder_path}: {e}")
+    end_time = time.time()
+    duration = end_time - start_time
     
-    print(f"✅ Cleaned up {cleaned_count} folders")
+    successful = sum(1 for r in results if r.get('success', False))
+    processed = len(results)
+    
+    print(f"\n⏱️  Sequential processing timing:")
+    print(f"   Total time: {duration:.2f} seconds ({duration/60:.1f} minutes)")
+    print(f"   Videos processed: {processed}/{len(urls)}")
+    print(f"   Successful downloads: {successful}")
+    print(f"   Average time per video: {duration/max(processed, 1):.2f} seconds")
+    
+    return results
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Enhanced TikTok downloader with metadata and batch processing")
+    parser = argparse.ArgumentParser(description="Robust TikTok downloader with multi-process support")
     parser.add_argument("url", nargs='?', help="TikTok video URL (not needed with --from-file)")
+<<<<<<< HEAD
     parser.add_argument("-o", "--output", default="downloads", 
                        help="Output directory (default: downloads)")
     parser.add_argument("-q", "--quality", default="best",
@@ -781,34 +1082,40 @@ def main():
                        help="Append metadata to master JSON file")
     parser.add_argument("--clean", action="store_true",
                        help="Clean up individual folders after processing (use with --append)")
+=======
+    parser.add_argument("-o", "--output", default="downloads", help="Output directory")
+    parser.add_argument("-q", "--quality", default="best", choices=["best", "worst", "720p", "480p", "360p"])
+    parser.add_argument("--mp3", action="store_true", help="Download audio only as MP3")
+    parser.add_argument("--from-file", "-ff", type=str, help="Process URLs from text file")
+    parser.add_argument("--append", type=str, help="Append metadata to master JSON file (real-time)")
+    parser.add_argument("--clean", action="store_true", help="Clean up individual folders after ALL processing")
+    parser.add_argument("--whisper", action="store_true", help="Use faster-whisper for transcription")
+    parser.add_argument("--force-cpu", action="store_true", help="Force CPU mode for whisper")
+    parser.add_argument("--multi", action="store_true", help="Enable multi-process downloading (10 workers)")
+    parser.add_argument("--processes", type=int, default=10, help="Number of worker processes (default: 10)")
+>>>>>>> 984530b99fa9ef41e5b6c465ed5913baf6d9f5e4
     
     args = parser.parse_args()
-    
-    # Handle diagnostic mode
-    if args.diagnose:
-        diagnose_cuda_environment()
-        return
     
     # Validate arguments
     if not args.url and not args.from_file:
         print("❌ Either provide a URL or use --from-file")
         sys.exit(1)
     
+    print("🚀 Robust TikTok Scraper v3.0")
+    print("=" * 50)
+    print(f"Platform: {platform.system()}")
+    print(f"Memory usage: {get_memory_usage():.1f} MB")
+    
     if args.url and "tiktok.com" not in args.url:
         print("❌ Please provide a valid TikTok URL")
         sys.exit(1)
     
-    # Load whisper model if requested
+    # Initialize whisper variables
     whisper_model = None
     whisper_device = "CPU"
-    if args.whisper:
-        print("🎤 Loading faster-whisper model...")
-        whisper_model, whisper_device = load_whisper_model(force_cpu=args.force_cpu)
-        if not whisper_model:
-            print("❌ Failed to load whisper model")
-            sys.exit(1)
-        print(f"✅ Whisper model loaded on {whisper_device}")
     
+<<<<<<< HEAD
     # Prepare kwargs for download function
     download_kwargs = {
         'output_dir': args.output,
@@ -819,41 +1126,118 @@ def main():
         'whisper_device': whisper_device,
         'scrape_comments': args.scrape_comments
     }
+=======
+    # Load whisper model if needed (only for sequential processing)
+    if args.whisper and not args.multi:
+        if WHISPER_AVAILABLE:
+            print("🎤 Loading Whisper model...")
+            whisper_model, whisper_device = load_whisper_model(force_cpu=args.force_cpu)
+            if not whisper_model:
+                print("❌ Failed to load Whisper model, transcription disabled")
+                args.whisper = False
+        else:
+            print("❌ faster-whisper not available, transcription disabled")
+            args.whisper = False
+    elif args.whisper and args.multi:
+        # For multi-processing, whisper models are loaded in worker processes
+        if not WHISPER_AVAILABLE:
+            print("❌ faster-whisper not available, transcription disabled")
+            args.whisper = False
+        else:
+            whisper_device = "CPU" if args.force_cpu else "AUTO"
+>>>>>>> 984530b99fa9ef41e5b6c465ed5913baf6d9f5e4
     
-    # Process videos
+    overall_start_time = time.time()
     results = []
     
     if args.from_file:
-        # Batch processing
-        results = process_from_file(args.from_file, **download_kwargs)
+        # Load URLs from file
+        unprocessed_urls, processed_urls = load_urls_from_file(args.from_file)
+        
+        if not unprocessed_urls:
+            print("✅ All URLs in file have been processed!")
+            return
+        
+        # Check against existing downloads
+        existing_urls = get_existing_urls(args.output)
+        urls_to_process = [url for url in unprocessed_urls if url not in existing_urls]
+        
+        if len(urls_to_process) < len(unprocessed_urls):
+            skipped = len(unprocessed_urls) - len(urls_to_process)
+            print(f"⏭️  Skipping {skipped} URLs (already downloaded)")
+        
+        if not urls_to_process:
+            print("✅ All unprocessed URLs have already been downloaded!")
+            return
+        
+        # Process URLs
+        if args.multi:
+            results = process_urls_multi(
+                urls_to_process, args.output, args.quality, args.mp3, 
+                args.append, args.from_file, args.processes, args.whisper, whisper_device
+            )
+        else:
+            results = process_urls_sequential(
+                urls_to_process, args.output, args.quality, args.mp3, 
+                args.append, args.from_file, args.whisper, whisper_model, whisper_device
+            )
     else:
-        # Single video
-        result = download_tiktok_video(args.url, **download_kwargs)
+        # Single URL
+        print("📱 Single URL mode")
+        start_time = time.time()
+        
+        result = download_single_video(args.url, args.output, args.quality, args.mp3, 
+                                     args.whisper, whisper_model, whisper_device)
         results = [result]
+        
+        if result['success'] and args.append:
+            append_to_master_json(result['metadata'], args.append)
+        
+        end_time = time.time()
+        duration = end_time - start_time
+        
+        print(f"\n⏱️  Single URL timing: {duration:.2f} seconds")
+        
+        if result['success']:
+            print(f"✅ Downloaded: {result['metadata']['title']}")
+        else:
+            print(f"❌ Failed: {result.get('error', 'Unknown error')}")
     
-    # Append to master JSON if requested
-    if args.append:
-        print(f"\n📎 Appending metadata to master file...")
-        for result in results:
-            if result['success']:
-                append_to_master_json(result['metadata'], args.append)
-    
-    # Clean up folders if requested
-    if args.clean:
-        print(f"\n🗑️  Cleaning up folders...")
-        cleanup_folders(results, args.output)
+    # Overall timing
+    overall_end_time = time.time()
+    overall_duration = overall_end_time - overall_start_time
     
     # Summary
-    successful = sum(1 for r in results if r['success'])
+    successful = sum(1 for r in results if r.get('success', False))
     total = len(results)
     
     print(f"\n🎉 Processing completed!")
+    print(f"⏱️  Total execution time: {overall_duration:.2f} seconds ({overall_duration/60:.1f} minutes)")
     print(f"✅ Successful: {successful}/{total}")
     if successful < total:
         print(f"❌ Failed: {total - successful}/{total}")
+    
+    # Clean up only if ALL processing is complete and not interrupted
+    if args.clean and not shutdown_requested and args.from_file:
+        # Verify all URLs have been processed
+        unprocessed_urls, _ = load_urls_from_file(args.from_file)
+        if not unprocessed_urls:
+            print(f"\n🗑️  All URLs processed. Cleaning up downloads folder...")
+            try:
+                shutil.rmtree(args.output)
+                print(f"✅ Cleaned up: {args.output}")
+            except Exception as e:
+                print(f"❌ Cleanup failed: {e}")
+        else:
+            print(f"\n🚫 Cleanup skipped: {len(unprocessed_urls)} URLs still unprocessed")
+    elif args.clean and shutdown_requested:
+        print("\n🚫 Cleanup skipped due to interrupted execution")
+    
+    print(f"\n💾 Final memory usage: {get_memory_usage():.1f} MB")
 
 
 if __name__ == "__main__":
+<<<<<<< HEAD
     # Interactive mode if no arguments
     if len(sys.argv) == 1:
         platform_info = get_platform_info()
@@ -911,3 +1295,13 @@ if __name__ == "__main__":
             print(f"📁 Files saved to: {result['folder']}")
     else:
         main()
+=======
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n🛑 Program interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {e}")
+        sys.exit(1)
+>>>>>>> 984530b99fa9ef41e5b6c465ed5913baf6d9f5e4
