@@ -196,6 +196,9 @@ def transcribe_with_whisper(video_path, whisper_model, device_type):
     except Exception as e:
         print(f"❌ Whisper transcription failed: {e}")
         return ""
+
+
+def get_memory_usage():
     """Get current memory usage in MB"""
     process = psutil.Process()
     return process.memory_info().rss / 1024 / 1024
@@ -704,6 +707,29 @@ def main():
     if args.url and "tiktok.com" not in args.url:
         print("❌ Please provide a valid TikTok URL")
         sys.exit(1)
+    
+    # Initialize whisper variables
+    whisper_model = None
+    whisper_device = "CPU"
+    
+    # Load whisper model if needed (only for sequential processing)
+    if args.whisper and not args.multi:
+        if WHISPER_AVAILABLE:
+            print("🎤 Loading Whisper model...")
+            whisper_model, whisper_device = load_whisper_model(force_cpu=args.force_cpu)
+            if not whisper_model:
+                print("❌ Failed to load Whisper model, transcription disabled")
+                args.whisper = False
+        else:
+            print("❌ faster-whisper not available, transcription disabled")
+            args.whisper = False
+    elif args.whisper and args.multi:
+        # For multi-processing, whisper models are loaded in worker processes
+        if not WHISPER_AVAILABLE:
+            print("❌ faster-whisper not available, transcription disabled")
+            args.whisper = False
+        else:
+            whisper_device = "CPU" if args.force_cpu else "AUTO"
     
     overall_start_time = time.time()
     results = []
