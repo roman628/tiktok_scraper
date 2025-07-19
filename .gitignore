@@ -1,9 +1,8 @@
 # Ignore Python virtual environment
 venv/
+.hive-mind
 downloads/
-
-
-
+__pycache__/
 
 # Dependencies
 node_modules/
@@ -13,7 +12,6 @@ yarn-error.log*
 
 # Output directories
 output/
-downloads/
 test_output/
 
 # Log files
@@ -63,3 +61,10 @@ temp/
 # Build files
 dist/
 build/
+
+# Test files
+test_*.txt
+test_*.py
+test_*.json
+
+package-lock.json

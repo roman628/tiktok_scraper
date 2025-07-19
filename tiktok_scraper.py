@@ -36,6 +36,13 @@ except ImportError:
     print("Install it with: pip install yt-dlp")
     sys.exit(1)
 
+try:
+    from comment_scraper import scrape_tiktok_comments
+except ImportError:
+    print("⚠️  Comment scraper not available. Comments will not be extracted.")
+    def scrape_tiktok_comments(url, max_comments=5):
+        return []
+
 # Try to import faster-whisper
 try:
     from faster_whisper import WhisperModel
@@ -179,6 +186,282 @@ def load_whisper_model(force_cpu=False):
         return None, None
 
 
+<<<<<<< HEAD
+def diagnose_cuda_environment():
+    """Diagnose CUDA environment for debugging across platforms"""
+    platform_info = get_platform_info()
+    
+    print(f"\n🔍 CUDA Environment Diagnostic ({platform_info['system'].title()}):")
+    print(f"🐍 Python: {sys.version}")
+    print(f"📁 Python prefix: {sys.prefix}")
+    
+    # Check if in virtual environment
+    venv_path = find_venv_path()
+    if venv_path:
+        print(f"🌐 Virtual environment: {venv_path}")
+    else:
+        print("🌐 Not in virtual environment")
+    
+    # Find NVIDIA libraries
+    nvidia_locations = find_nvidia_libraries()
+    
+    if nvidia_locations:
+        print("\n📦 NVIDIA Libraries Found:")
+        for location_type, base_path in nvidia_locations:
+            print(f"   ✅ {location_type}: {base_path}")
+            
+            # Check specific components for pip installations
+            if "nvidia" in base_path:
+                components = ["cublas", "cudnn", "cufft", "curand", "cusparse"]
+                for component in components:
+                    if platform_info['is_windows']:
+                        comp_path = os.path.join(base_path, component, "bin")
+                        dll_pattern = "*.dll"
+                    else:
+                        comp_path = os.path.join(base_path, component, "lib")
+                        dll_pattern = "*.so*"
+                    
+                    if os.path.exists(comp_path):
+                        try:
+                            if platform_info['is_windows']:
+                                files = [f for f in os.listdir(comp_path) if f.endswith('.dll')]
+                            else:
+                                files = [f for f in os.listdir(comp_path) if '.so' in f]
+                            print(f"      ✅ {component}: {len(files)} libraries")
+                            
+                            # Check for specific cuDNN library that commonly fails
+                            if component == "cudnn":
+                                if platform_info['is_windows']:
+                                    critical_files = [f for f in files if 'cudnn_ops' in f]
+                                else:
+                                    critical_files = [f for f in files if 'libcudnn_ops' in f]
+                                if critical_files:
+                                    print(f"         ✅ Critical cuDNN ops library found")
+                                else:
+                                    print(f"         ⚠️  cuDNN ops library not found")
+                        except Exception as e:
+                            print(f"      ❌ Error reading {component}: {e}")
+                    else:
+                        print(f"      ❌ {component}: Not found")
+    else:
+        print("\n❌ No NVIDIA libraries found")
+        print("💡 Try installing: pip install nvidia-cudnn-cu12 nvidia-cublas-cu12")
+    
+    # Check current environment variables
+    current_path = os.environ.get('PATH', '')
+    cuda_in_path = any('nvidia' in path.lower() or 'cuda' in path.lower() 
+                      for path in current_path.split(platform_info['path_sep']))
+    if cuda_in_path:
+        print("✅ CUDA-related paths detected in PATH")
+    else:
+        print("⚠️  No CUDA paths in PATH")
+    
+    if not platform_info['is_windows']:
+        ld_path = os.environ.get('LD_LIBRARY_PATH', '')
+        if ld_path and ('nvidia' in ld_path.lower() or 'cuda' in ld_path.lower()):
+            print("✅ CUDA-related paths in LD_LIBRARY_PATH")
+        else:
+            print("⚠️  No CUDA paths in LD_LIBRARY_PATH")
+    
+    # Test CUDA setup
+    print("\n🧪 Testing CUDA setup...")
+    setup_cuda_paths()
+    print("✅ CUDA paths configured for this session")
+    
+    # Check for common ML frameworks
+    frameworks = [
+        ('torch', 'PyTorch'),
+        ('tensorflow', 'TensorFlow'),
+        ('faster_whisper', 'Faster-Whisper')
+    ]
+    
+    print("\n🧠 ML Framework Check:")
+    for module, name in frameworks:
+        try:
+            __import__(module)
+            print(f"   ✅ {name} installed")
+            
+            # Special check for PyTorch CUDA
+            if module == 'torch':
+                torch = __import__(module)
+                if hasattr(torch, 'cuda') and torch.cuda.is_available():
+                    try:
+                        device_name = torch.cuda.get_device_name()
+                        print(f"      ✅ CUDA available: {device_name}")
+                    except:
+                        print(f"      ✅ CUDA available: Device name unavailable")
+                else:
+                    print(f"      ❌ CUDA not available")
+        except ImportError:
+            print(f"   ❌ {name} not installed")
+    
+    print()  # Empty line for readability
+
+
+def sanitize_filename(filename):
+    """Sanitize filename for filesystem compatibility across platforms"""
+    # Remove or replace invalid characters (more comprehensive for cross-platform)
+    if platform.system() == 'Windows':
+        invalid_chars = r'[<>:"/\\|?*]'
+    else:
+        invalid_chars = r'[/]'  # Unix systems mainly restrict forward slash
+    
+    filename = re.sub(invalid_chars, '_', filename)
+    filename = re.sub(r'\s+', ' ', filename).strip()
+    filename = filename.strip('.')
+    
+    # Limit length (filesystem limits)
+    max_length = 200 if platform.system() == 'Windows' else 255
+    if len(filename) > max_length:
+        filename = filename[:max_length]
+    
+    return filename
+
+
+def extract_subtitles_text(info_dict):
+    """Extract subtitles and convert to plain text paragraph"""
+    subtitle_text = ""
+    
+    # Try automatic captions first
+    if 'automatic_captions' in info_dict:
+        for lang, captions in info_dict['automatic_captions'].items():
+            if captions and isinstance(captions, list):
+                for caption in captions:
+                    if caption.get('ext') == 'vtt' and caption.get('url'):
+                        try:
+                            import urllib.request
+                            with urllib.request.urlopen(caption['url']) as response:
+                                vtt_content = response.read().decode('utf-8')
+                                # Simple VTT parsing - extract text lines
+                                lines = vtt_content.split('\n')
+                                text_lines = []
+                                for line in lines:
+                                    line = line.strip()
+                                    # Skip VTT headers, timestamps, and empty lines
+                                    if (line and not line.startswith('WEBVTT') and 
+                                        not line.startswith('NOTE') and
+                                        not '-->' in line and
+                                        not line.isdigit()):
+                                        # Remove VTT formatting tags
+                                        clean_line = re.sub(r'<[^>]+>', '', line)
+                                        if clean_line:
+                                            text_lines.append(clean_line)
+                                
+                                subtitle_text = ' '.join(text_lines)
+                                break
+                        except Exception as e:
+                            print(f"⚠️  Failed to download subtitles: {e}")
+                
+                if subtitle_text:
+                    break
+    
+    # Try regular subtitles if automatic captions failed
+    if not subtitle_text and 'subtitles' in info_dict:
+        for lang, subs in info_dict['subtitles'].items():
+            if subs and isinstance(subs, list):
+                for sub in subs:
+                    if sub.get('ext') == 'vtt' and sub.get('url'):
+                        try:
+                            import urllib.request
+                            with urllib.request.urlopen(sub['url']) as response:
+                                vtt_content = response.read().decode('utf-8')
+                                lines = vtt_content.split('\n')
+                                text_lines = []
+                                for line in lines:
+                                    line = line.strip()
+                                    if (line and not line.startswith('WEBVTT') and 
+                                        not line.startswith('NOTE') and
+                                        not '-->' in line and
+                                        not line.isdigit()):
+                                        clean_line = re.sub(r'<[^>]+>', '', line)
+                                        if clean_line:
+                                            text_lines.append(clean_line)
+                                
+                                subtitle_text = ' '.join(text_lines)
+                                break
+                        except Exception as e:
+                            print(f"⚠️  Failed to download subtitles: {e}")
+                
+                if subtitle_text:
+                    break
+    
+    return subtitle_text.strip()
+
+
+def extract_metadata(info_dict, url=None, scrape_comments=False):
+    """Extract and organize metadata from yt-dlp info dictionary"""
+    
+    # Extract subtitle text
+    subtitle_text = extract_subtitles_text(info_dict)
+    
+    metadata = {
+        # Basic video info
+        "title": info_dict.get('title', 'Unknown'),
+        "description": info_dict.get('description', ''),
+        "duration": info_dict.get('duration', 0),
+        "video_id": info_dict.get('id', ''),
+        "url": info_dict.get('webpage_url', ''),
+        
+        # Creator info
+        "uploader": info_dict.get('uploader', 'Unknown'),
+        "uploader_id": info_dict.get('uploader_id', ''),
+        "uploader_url": info_dict.get('uploader_url', ''),
+        
+        # Engagement metrics (what yt-dlp can extract)
+        "view_count": info_dict.get('view_count', 0),
+        "like_count": info_dict.get('like_count', 0),
+        "comment_count": info_dict.get('comment_count', 0),
+        "repost_count": info_dict.get('repost_count', 0),
+        
+        # Note: yt-dlp typically cannot extract these from TikTok
+        "save_count": info_dict.get('save_count', 0),  # Usually not available
+        "share_count": info_dict.get('share_count', 0),  # Usually not available
+        
+        # Content details
+        "hashtags": info_dict.get('tags', []),
+        "upload_date": info_dict.get('upload_date', ''),
+        "timestamp": info_dict.get('timestamp', 0),
+        
+        # Technical details
+        "width": info_dict.get('width', 0),
+        "height": info_dict.get('height', 0),
+        "fps": info_dict.get('fps', 0),
+        "filesize": info_dict.get('filesize', 0),
+        "format": info_dict.get('format', ''),
+        
+        # Transcription data
+        "subtitle_transcription": subtitle_text,
+        "custom_transcription": "",
+        "transcription_timestamp": "",
+        
+        # Comments (yt-dlp limitation - usually empty for TikTok)
+        "top_comments": [],  # Will be populated by web scraping if enabled
+        
+        # Download metadata
+        "downloaded_at": datetime.now().isoformat(),
+        "downloaded_with": f"Enhanced TikTok Downloader v2.1 ({platform.system()})",
+        "platform": platform.system()
+    }
+    
+    # Scrape comments if enabled and URL is provided
+    if scrape_comments and url:
+        try:
+            print("🔍 Scraping comments...")
+            comments = scrape_tiktok_comments(url, 10)
+            metadata["top_comments"] = comments
+            if comments:
+                print(f"✅ Successfully scraped {len(comments)} comments")
+            else:
+                print("⚠️  No comments scraped")
+        except Exception as e:
+            print(f"❌ Error scraping comments: {e}")
+            metadata["top_comments"] = []
+    
+    return metadata
+
+
+=======
+>>>>>>> 984530b99fa9ef41e5b6c465ed5913baf6d9f5e4
 def transcribe_with_whisper(video_path, whisper_model, device_type):
     """Transcribe video file using faster-whisper"""
     try:
@@ -198,6 +481,37 @@ def transcribe_with_whisper(video_path, whisper_model, device_type):
         return ""
 
 
+<<<<<<< HEAD
+def download_tiktok_video(url, output_dir="downloads", quality="best", audio_only=False, 
+                         use_whisper=False, whisper_model=None, whisper_device="CPU", scrape_comments=False):
+    """
+    Download a TikTok video with comprehensive metadata extraction
+    """
+    
+    # Create base output directory if it doesn't exist
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    # First, extract info without downloading to get metadata
+    print("📊 Extracting video information...")
+    
+    temp_ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': False,
+        'writesubtitles': True,
+        'writeautomaticsub': True,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(temp_ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+        # Extract metadata
+        metadata = extract_metadata(info, url, scrape_comments)
+=======
 def get_memory_usage():
     """Get current memory usage in MB"""
     process = psutil.Process()
@@ -220,6 +534,7 @@ def kill_browser_processes():
         current_process = psutil.Process(current_pid)
         for child in current_process.children(recursive=True):
             our_children.add(child.pid)
+>>>>>>> 984530b99fa9ef41e5b6c465ed5913baf6d9f5e4
         
         # Only kill browser processes that are our descendants
         for proc in psutil.process_iter(['pid', 'name', 'ppid']):
@@ -540,6 +855,36 @@ def process_urls_multi(urls, output_dir, quality, audio_only, append_file, url_f
     if not urls:
         return []
     
+<<<<<<< HEAD
+    print(f"🔄 Processing {len(urls)} URLs from {file_path}")
+    results = []
+    batch_metadata = []  # Store metadata for batch processing
+    
+    for i, url in enumerate(urls, 1):
+        print(f"\n{'='*50}")
+        print(f"Processing {i}/{len(urls)}: {url}")
+        print(f"{'='*50}")
+        
+        result = download_tiktok_video(url, **kwargs)
+        results.append(result)
+        
+        if result['success']:
+            print(f"✅ {i}/{len(urls)} completed successfully")
+            batch_metadata.append(result['metadata'])
+        else:
+            print(f"❌ {i}/{len(urls)} failed: {result.get('error', 'Unknown error')}")
+        
+        # Auto-append to master2.json every 10 successful downloads
+        if len(batch_metadata) >= 10:
+            print(f"\n💾 Auto-saving batch of {len(batch_metadata)} videos to master2.json...")
+            append_batch_to_master_json(batch_metadata, "master2.json")
+            batch_metadata = []  # Reset batch
+    
+    # Save any remaining metadata at the end
+    if batch_metadata:
+        print(f"\n💾 Saving final batch of {len(batch_metadata)} videos to master2.json...")
+        append_batch_to_master_json(batch_metadata, "master2.json")
+=======
     print(f"🚀 Starting multi-process download with {num_processes} workers")
     print(f"📊 Processing {len(urls)} URLs")
     
@@ -608,13 +953,47 @@ def process_urls_multi(urls, output_dir, quality, audio_only, append_file, url_f
     print(f"   Videos processed: {processed_count}/{len(urls)}")
     print(f"   Successful downloads: {successful}")
     print(f"   Average time per video: {duration/max(processed_count, 1):.2f} seconds")
+>>>>>>> 984530b99fa9ef41e5b6c465ed5913baf6d9f5e4
     
     return results
 
 
+<<<<<<< HEAD
+def append_batch_to_master_json(metadata_list, master_file_path):
+    """Append batch of metadata to master JSON file"""
+    master_path = Path(master_file_path)
+    
+    # Load existing data or create new list
+    if master_path.exists():
+        try:
+            with open(master_path, 'r', encoding='utf-8') as f:
+                master_data = json.load(f)
+            if not isinstance(master_data, list):
+                master_data = [master_data]  # Convert single object to list
+        except json.JSONDecodeError:
+            print(f"⚠️  Invalid JSON in {master_path}, creating new file")
+            master_data = []
+    else:
+        master_data = []
+    
+    # Append new metadata batch
+    master_data.extend(metadata_list)
+    
+    # Save updated data
+    with open(master_path, 'w', encoding='utf-8') as f:
+        json.dump(master_data, f, indent=2, ensure_ascii=False)
+    
+    print(f"📎 Appended batch to master file: {master_path} (+{len(metadata_list)} videos, total: {len(master_data)} videos)")
+
+
+def append_to_master_json(metadata, master_file_path):
+    """Append metadata to master JSON file"""
+    master_path = Path(master_file_path)
+=======
 def process_urls_sequential(urls, output_dir, quality, audio_only, append_file, url_file, use_whisper=False, whisper_model=None, whisper_device="CPU"):
     """Process URLs sequentially"""
     global shutdown_requested
+>>>>>>> 984530b99fa9ef41e5b6c465ed5913baf6d9f5e4
     
     if not urls:
         return []
@@ -681,6 +1060,29 @@ def process_urls_sequential(urls, output_dir, quality, audio_only, append_file, 
 def main():
     parser = argparse.ArgumentParser(description="Robust TikTok downloader with multi-process support")
     parser.add_argument("url", nargs='?', help="TikTok video URL (not needed with --from-file)")
+<<<<<<< HEAD
+    parser.add_argument("-o", "--output", default="downloads", 
+                       help="Output directory (default: downloads)")
+    parser.add_argument("-q", "--quality", default="best",
+                       choices=["best", "worst", "720p", "480p", "360p"],
+                       help="Video quality (default: best)")
+    parser.add_argument("--mp3", action="store_true",
+                       help="Download audio only as MP3 instead of video")
+    parser.add_argument("--whisper", action="store_true",
+                       help="Use faster-whisper for additional transcription")
+    parser.add_argument("--force-cpu", action="store_true",
+                       help="Force CPU mode for whisper (bypass GPU issues)")
+    parser.add_argument("--scrape-comments", action="store_true",
+                       help="Scrape top 5 comments from TikTok videos")
+    parser.add_argument("--diagnose", action="store_true",
+                       help="Diagnose CUDA environment and exit")
+    parser.add_argument("--from-file", "-ff", type=str,
+                       help="Batch process URLs from text file")
+    parser.add_argument("--append", type=str,
+                       help="Append metadata to master JSON file")
+    parser.add_argument("--clean", action="store_true",
+                       help="Clean up individual folders after processing (use with --append)")
+=======
     parser.add_argument("-o", "--output", default="downloads", help="Output directory")
     parser.add_argument("-q", "--quality", default="best", choices=["best", "worst", "720p", "480p", "360p"])
     parser.add_argument("--mp3", action="store_true", help="Download audio only as MP3")
@@ -691,6 +1093,7 @@ def main():
     parser.add_argument("--force-cpu", action="store_true", help="Force CPU mode for whisper")
     parser.add_argument("--multi", action="store_true", help="Enable multi-process downloading (10 workers)")
     parser.add_argument("--processes", type=int, default=10, help="Number of worker processes (default: 10)")
+>>>>>>> 984530b99fa9ef41e5b6c465ed5913baf6d9f5e4
     
     args = parser.parse_args()
     
@@ -712,6 +1115,18 @@ def main():
     whisper_model = None
     whisper_device = "CPU"
     
+<<<<<<< HEAD
+    # Prepare kwargs for download function
+    download_kwargs = {
+        'output_dir': args.output,
+        'quality': args.quality,
+        'audio_only': args.mp3,
+        'use_whisper': args.whisper,
+        'whisper_model': whisper_model,
+        'whisper_device': whisper_device,
+        'scrape_comments': args.scrape_comments
+    }
+=======
     # Load whisper model if needed (only for sequential processing)
     if args.whisper and not args.multi:
         if WHISPER_AVAILABLE:
@@ -730,6 +1145,7 @@ def main():
             args.whisper = False
         else:
             whisper_device = "CPU" if args.force_cpu else "AUTO"
+>>>>>>> 984530b99fa9ef41e5b6c465ed5913baf6d9f5e4
     
     overall_start_time = time.time()
     results = []
@@ -821,6 +1237,65 @@ def main():
 
 
 if __name__ == "__main__":
+<<<<<<< HEAD
+    # Interactive mode if no arguments
+    if len(sys.argv) == 1:
+        platform_info = get_platform_info()
+        print("Enhanced TikTok Video Downloader v2.1")
+        print("=" * 50)
+        print(f"Platform: {platform_info['system'].title()}")
+        print("Features:")
+        print("• Video + Comprehensive Metadata")
+        print("• Subtitle Extraction") 
+        print("• Optional Whisper Transcription")
+        print("• Batch Processing")
+        print("• Master JSON Compilation")
+        print("• Cross-platform Support")
+        print()
+        
+        url = input("Enter TikTok URL: ").strip()
+        if not url:
+            print("No URL provided. Exiting.")
+            sys.exit(1)
+            
+        if "tiktok.com" not in url:
+            print("❌ Please provide a valid TikTok URL")
+            sys.exit(1)
+        
+        output_dir = input("Output directory (press Enter for 'downloads'): ").strip()
+        if not output_dir:
+            output_dir = "downloads"
+            
+        quality = input("Quality (best/worst/720p/480p/360p, press Enter for 'best'): ").strip()
+        if not quality:
+            quality = "best"
+        
+        audio_only = input("Download audio only as MP3? (y/n, press Enter for 'n'): ").strip().lower()
+        audio_only = audio_only in ['y', 'yes', '1', 'true']
+        
+        use_whisper = input("Use faster-whisper transcription? (y/n, press Enter for 'n'): ").strip().lower()
+        use_whisper = use_whisper in ['y', 'yes', '1', 'true']
+        
+        scrape_comments = input("Scrape top 5 comments? (y/n, press Enter for 'n'): ").strip().lower()
+        scrape_comments = scrape_comments in ['y', 'yes', '1', 'true']
+        
+        whisper_model = None
+        whisper_device = "CPU"
+        if use_whisper:
+            print("🎤 Loading faster-whisper model...")
+            whisper_model, whisper_device = load_whisper_model(force_cpu=False)
+            if whisper_model:
+                print(f"✅ Whisper model loaded on {whisper_device}")
+            else:
+                use_whisper = False
+        
+        result = download_tiktok_video(url, output_dir, quality, audio_only, use_whisper, whisper_model, whisper_device, scrape_comments)
+        if result['success']:
+            print(f"\n🎉 Download completed successfully!")
+            print(f"📁 Files saved to: {result['folder']}")
+    else:
+        main()
+=======
     try:
         main()
     except KeyboardInterrupt:
@@ -829,3 +1304,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n❌ Unexpected error: {e}")
         sys.exit(1)
+>>>>>>> 984530b99fa9ef41e5b6c465ed5913baf6d9f5e4
