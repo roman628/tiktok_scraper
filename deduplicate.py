@@ -2,36 +2,39 @@
 """
 URL Deduplicator Script
 
-This script takes two text files containing URLs (one per line) as input,
-combines them, removes duplicates, and outputs the unique URLs to a third file.
+This script takes one or more text files containing URLs (one per line) as input,
+combines them, removes duplicates (both within and between files), and outputs 
+the unique URLs to a specified output file.
 
 Usage:
-    python url_deduplicator.py file1.txt file2.txt output.txt
+    python deduplicate.py file1.txt [file2.txt ...] -o output.txt
 
 Example:
-    python url_deduplicator.py tiktok_urls_1.txt tiktok_urls_2.txt combined_urls.txt
+    python deduplicate.py file1.txt file2.txt file3.txt -o deduped.txt
 """
 
 import sys
 import os
+import argparse
 from typing import Set, List
 
 
-def read_urls_from_file(filepath: str) -> Set[str]:
+def read_urls_from_file(filepath: str) -> tuple[Set[str], int]:
     """
-    Read URLs from a text file and return them as a set (automatically deduplicates).
+    Read URLs from a text file and return them as a set and total line count.
     
     Args:
         filepath: Path to the input file
         
     Returns:
-        Set of unique URLs from the file
+        Tuple of (unique URLs from the file, total lines read)
         
     Raises:
         FileNotFoundError: If the file doesn't exist
         IOError: If there's an error reading the file
     """
     urls = set()
+    total_lines = 0
     
     try:
         with open(filepath, 'r', encoding='utf-8') as file:
@@ -40,9 +43,10 @@ def read_urls_from_file(filepath: str) -> Set[str]:
                 url = line.strip()
                 if url:
                     urls.add(url)
+                    total_lines += 1
                     
-        print(f"✅ Read {len(urls)} unique URLs from {filepath}")
-        return urls
+        print(f"✅ Read {total_lines} lines, {len(urls)} unique URLs from {filepath}")
+        return urls, total_lines
         
     except FileNotFoundError:
         print(f"❌ Error: File '{filepath}' not found.")
@@ -75,32 +79,38 @@ def write_urls_to_file(urls: List[str], filepath: str) -> None:
         raise
 
 
-def deduplicate_url_files(file1: str, file2: str, output_file: str) -> None:
+def deduplicate_url_files(input_files: List[str], output_file: str) -> None:
     """
-    Combine two URL files, remove duplicates, and save to output file.
+    Combine multiple URL files, remove duplicates (both within and between files), 
+    and save to output file.
     
     Args:
-        file1: Path to first input file
-        file2: Path to second input file
+        input_files: List of paths to input files
         output_file: Path to output file
     """
     print(f"🔄 Starting URL deduplication process...")
-    print(f"📂 Input file 1: {file1}")
-    print(f"📂 Input file 2: {file2}")
+    print(f"📂 Input files ({len(input_files)}):")
+    for i, file in enumerate(input_files, 1):
+        print(f"   {i}. {file}")
     print(f"📝 Output file: {output_file}")
     print("-" * 50)
     
-    # Read URLs from both files
-    urls1 = read_urls_from_file(file1)
-    urls2 = read_urls_from_file(file2)
+    # Read URLs from all files and track statistics
+    all_urls = set()
+    total_lines_all_files = 0
+    file_stats = []
     
-    # Combine and get statistics
-    combined_urls = urls1.union(urls2)
-    total_input_urls = len(urls1) + len(urls2)
-    duplicates_removed = total_input_urls - len(combined_urls)
+    for file_path in input_files:
+        urls, total_lines = read_urls_from_file(file_path)
+        file_stats.append((file_path, total_lines, len(urls)))
+        all_urls.update(urls)
+        total_lines_all_files += total_lines
+    
+    # Calculate statistics
+    duplicates_removed = total_lines_all_files - len(all_urls)
     
     # Sort URLs for consistent output
-    sorted_urls = sorted(list(combined_urls))
+    sorted_urls = sorted(list(all_urls))
     
     # Write to output file
     write_urls_to_file(sorted_urls, output_file)
@@ -108,11 +118,11 @@ def deduplicate_url_files(file1: str, file2: str, output_file: str) -> None:
     # Print summary statistics
     print("-" * 50)
     print("📊 DEDUPLICATION SUMMARY:")
-    print(f"   File 1 URLs: {len(urls1)}")
-    print(f"   File 2 URLs: {len(urls2)}")
-    print(f"   Total input URLs: {total_input_urls}")
-    print(f"   Duplicates removed: {duplicates_removed}")
-    print(f"   Unique URLs: {len(combined_urls)}")
+    for file_path, total_lines, unique_in_file in file_stats:
+        print(f"   {os.path.basename(file_path)}: {total_lines} lines, {unique_in_file} unique")
+    print(f"   Total input lines: {total_lines_all_files}")
+    print(f"   Duplicates found: {duplicates_removed}")
+    print(f"   Unique URLs: {len(all_urls)}")
     print(f"   Output file: {output_file}")
     print("✨ Deduplication complete!")
 
@@ -120,35 +130,39 @@ def deduplicate_url_files(file1: str, file2: str, output_file: str) -> None:
 def main():
     """Main function to handle command line arguments and execute deduplication."""
     
-    # Check command line arguments
-    if len(sys.argv) != 4:
-        print("❌ Error: Incorrect number of arguments.")
-        print("\nUsage:")
-        print("   python url_deduplicator.py <file1> <file2> <output_file>")
-        print("\nExample:")
-        print("   python url_deduplicator.py urls1.txt urls2.txt combined.txt")
-        print("\nDescription:")
-        print("   Combines two text files containing URLs (one per line),")
-        print("   removes duplicates, and saves unique URLs to output file.")
-        sys.exit(1)
+    # Set up argument parser
+    parser = argparse.ArgumentParser(
+        description="Deduplicate URLs from multiple text files",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python deduplicate.py file1.txt -o output.txt
+  python deduplicate.py file1.txt file2.txt file3.txt -o deduped.txt
+  python deduplicate.py urls/*.txt -o combined_unique.txt
+        """)
     
-    file1, file2, output_file = sys.argv[1], sys.argv[2], sys.argv[3]
+    parser.add_argument('input_files', nargs='+', 
+                       help='One or more input text files containing URLs')
+    parser.add_argument('-o', '--output', required=True,
+                       help='Output file for deduplicated URLs')
+    
+    args = parser.parse_args()
     
     # Validate input files exist
-    for filepath in [file1, file2]:
+    for filepath in args.input_files:
         if not os.path.isfile(filepath):
             print(f"❌ Error: Input file '{filepath}' does not exist.")
             sys.exit(1)
     
     # Check if output file already exists
-    if os.path.exists(output_file):
-        response = input(f"⚠️  Output file '{output_file}' already exists. Overwrite? (y/N): ")
+    if os.path.exists(args.output):
+        response = input(f"⚠️  Output file '{args.output}' already exists. Overwrite? (y/N): ")
         if response.lower() not in ['y', 'yes']:
             print("❌ Operation cancelled.")
             sys.exit(1)
     
     try:
-        deduplicate_url_files(file1, file2, output_file)
+        deduplicate_url_files(args.input_files, args.output)
         
     except (FileNotFoundError, IOError) as e:
         print(f"❌ Error: {e}")
