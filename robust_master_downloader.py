@@ -15,20 +15,225 @@ import argparse
 import asyncio
 import time
 import re
+import gc
+import tracemalloc
 from pathlib import Path
 from datetime import datetime
 from TikTokApi import TikTokApi
 
 # Import the video downloader functions
 from tiktok_scraper import (
-    download_tiktok_video, 
-    append_batch_to_master_json,
+    download_single_video as download_tiktok_video, 
     load_whisper_model,
-    diagnose_cuda_environment
+    get_memory_usage
 )
+
+# Import memory efficient append
+try:
+    from memory_efficient_append import append_batch_to_master_json_efficient
+    append_batch_to_master_json = append_batch_to_master_json_efficient
+except ImportError:
+    from tiktok_scraper import append_to_master_json
+    
+    def append_batch_to_master_json(metadata_list, master_file_path):
+        """Batch append using individual append function"""
+        for metadata in metadata_list:
+            append_to_master_json(metadata, master_file_path)
 
 # Import comment extraction functions
 from comment_extractor import extract_video_id_from_url, extract_comment_replies
+
+
+def has_transcription_with_min_length(entry, min_length=50):
+    """Check if entry has transcription with minimum character length"""
+    if not isinstance(entry, dict):
+        return False
+    
+    # Check for transcription field
+    transcription = entry.get('transcription', '').strip()
+    if transcription and len(transcription) >= min_length:
+        return True
+    
+    # Check for subtitle field  
+    subtitle = entry.get('subtitle', '').strip()
+    if subtitle and len(subtitle) >= min_length:
+        return True
+    
+    # Check for subtitles field (plural)
+    subtitles = entry.get('subtitles', '').strip()
+    if subtitles and len(subtitles) >= min_length:
+        return True
+    
+    # Check for whisper_transcription field
+    whisper_transcription = entry.get('whisper_transcription', '').strip()
+    if whisper_transcription and len(whisper_transcription) >= min_length:
+        return True
+    
+    # Check for any field containing 'transcript'
+    for key, value in entry.items():
+        if 'transcript' in key.lower() and value:
+            text = str(value).strip()
+            if text and len(text) >= min_length:
+                return True
+    
+    return False
+
+
+def get_data_completeness_score(entry):
+    """Score an entry based on how complete its data is"""
+    score = 0
+    
+    # Basic fields
+    basic_fields = ['title', 'description', 'url', 'video_id', 'uploader', 'upload_date']
+    for field in basic_fields:
+        if field in entry and entry[field]:
+            score += 1
+    
+    # Metadata fields
+    metadata_fields = ['view_count', 'like_count', 'comment_count', 'duration', 'width', 'height']
+    for field in metadata_fields:
+        if field in entry and entry[field] is not None:
+            score += 1
+    
+    # Comments
+    if entry.get('comments_extracted') is True:
+        score += 10  # High value for having comments
+        comments = entry.get('top_comments', [])
+        score += min(len(comments), 10)  # Up to 10 points for comments
+    
+    # Transcription
+    if has_transcription_with_min_length(entry):
+        score += 5
+    
+    # Download info
+    if entry.get('downloaded_at'):
+        score += 2
+    
+    return score
+
+
+def remove_duplicates_from_data(data):
+    """Remove duplicate URLs from data, keeping the most complete entry"""
+    print(f"🔍 Checking for duplicates in {len(data)} entries...")
+    
+    # Group entries by URL
+    url_entries = {}
+    entries_without_url = []
+    
+    for entry in data:
+        if isinstance(entry, dict) and 'url' in entry:
+            url = entry['url']
+            if url not in url_entries:
+                url_entries[url] = []
+            url_entries[url].append(entry)
+        else:
+            entries_without_url.append(entry)
+    
+    # Find duplicates
+    duplicate_urls = [url for url, entries in url_entries.items() if len(entries) > 1]
+    
+    if duplicate_urls:
+        print(f"⚠️  Found {len(duplicate_urls)} duplicate URLs")
+    
+    # For each URL, keep the most complete entry
+    unique_entries = []
+    total_removed = 0
+    
+    for url, entries in url_entries.items():
+        if len(entries) == 1:
+            unique_entries.append(entries[0])
+        else:
+            # Score each entry and keep the best one
+            best_entry = max(entries, key=get_data_completeness_score)
+            unique_entries.append(best_entry)
+            total_removed += len(entries) - 1
+    
+    # Add back entries without URLs
+    unique_entries.extend(entries_without_url)
+    
+    if total_removed > 0:
+        print(f"🗑️  Removed {total_removed} duplicate entries")
+    
+    return unique_entries
+
+
+def clean_short_transcriptions(data, min_length=50):
+    """Remove entries with transcriptions shorter than min_length"""
+    print(f"🔍 Cleaning entries with transcriptions shorter than {min_length} characters...")
+    
+    entries_with_valid_transcription = []
+    entries_without_valid_transcription = []
+    entries_without_url = []
+    
+    for entry in data:
+        if isinstance(entry, dict):
+            if 'url' not in entry:
+                entries_without_url.append(entry)
+            elif has_transcription_with_min_length(entry, min_length):
+                entries_with_valid_transcription.append(entry)
+            else:
+                entries_without_valid_transcription.append(entry)
+        else:
+            entries_without_url.append(entry)
+    
+    cleaned_data = entries_with_valid_transcription + entries_without_url
+    removed_count = len(entries_without_valid_transcription)
+    
+    if removed_count > 0:
+        print(f"🗑️  Removed {removed_count} entries with insufficient transcription")
+    
+    return cleaned_data
+
+
+def auto_clean_master_json(master_file_path):
+    """Automatically clean master JSON by removing duplicates and short transcriptions"""
+    print("\n🧹 Starting automatic cleanup of master JSON...")
+    
+    if not os.path.exists(master_file_path):
+        print(f"⚠️  Master file {master_file_path} not found, skipping cleanup")
+        return
+    
+    try:
+        # Load data
+        with open(master_file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        if not isinstance(data, list):
+            print(f"⚠️  Master file is not an array, skipping cleanup")
+            return
+        
+        original_count = len(data)
+        print(f"📊 Original entries: {original_count}")
+        
+        # Remove duplicates
+        data = remove_duplicates_from_data(data)
+        
+        # Clean short transcriptions
+        data = clean_short_transcriptions(data, min_length=50)
+        
+        final_count = len(data)
+        total_removed = original_count - final_count
+        
+        if total_removed > 0:
+            # Create backup
+            backup_file = f"{master_file_path}.before_autoclean_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            import shutil
+            shutil.copy2(master_file_path, backup_file)
+            print(f"💾 Created backup: {backup_file}")
+            
+            # Save cleaned data
+            with open(master_file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            
+            print(f"✅ Cleanup completed!")
+            print(f"📊 Final entries: {final_count}")
+            print(f"🗑️  Total removed: {total_removed}")
+        else:
+            print("✅ No cleanup needed - all entries are already valid")
+            
+    except Exception as e:
+        print(f"❌ Error during cleanup: {e}")
+        print("⚠️  Continuing without cleanup")
 
 
 class RobustTikTokProcessor:
@@ -41,23 +246,45 @@ class RobustTikTokProcessor:
         self.successful_count = 0
         self.failed_count = 0
         self.skipped_count = 0
+        self.enable_memory_tracking = args.memory_tracking if hasattr(args, 'memory_tracking') else False
+        
+        if self.enable_memory_tracking:
+            tracemalloc.start()
+        
+        # Configure garbage collection for aggressive cleanup
+        gc.set_threshold(700, 10, 10)  # More aggressive GC
         
     def load_existing_progress(self):
         """Load existing URLs from master2.json and progress file"""
         print("🔍 Checking for existing progress...")
         
-        # Load URLs from master2.json
+        # Load URLs from master2.json using streaming to avoid memory issues
         if os.path.exists(self.master_file):
             try:
+                # Stream through the file to collect URLs without loading all data
                 with open(self.master_file, 'r', encoding='utf-8') as f:
-                    existing_data = json.load(f)
-                    
-                if isinstance(existing_data, list):
-                    for item in existing_data:
-                        if 'url' in item:
-                            self.processed_urls.add(item['url'])
+                    # Check if it's an array
+                    first_char = f.read(1)
+                    if first_char == '[':
+                        f.seek(0)
+                        # Use streaming JSON parser
+                        try:
+                            import ijson
+                            parser = ijson.items(f, 'item')
+                            for item in parser:
+                                if isinstance(item, dict) and 'url' in item:
+                                    self.processed_urls.add(item['url'])
+                        except ImportError:
+                            # Fallback to regular json if ijson not available
+                            f.seek(0)
+                            existing_data = json.load(f)
+                            if isinstance(existing_data, list):
+                                for item in existing_data:
+                                    if isinstance(item, dict) and 'url' in item:
+                                        self.processed_urls.add(item['url'])
                             
                 print(f"📊 Found {len(self.processed_urls)} existing URLs in {self.master_file}")
+                gc.collect()  # Clean up after loading
             except Exception as e:
                 print(f"⚠️  Error reading {self.master_file}: {e}")
         
@@ -195,6 +422,8 @@ class RobustTikTokProcessor:
         new_urls = []
         duplicate_count = 0
         
+        print(f"🔍 Checking {len(urls)} URLs against {len(self.processed_urls)} existing URLs...")
+        
         for url in urls:
             if self.is_duplicate(url):
                 duplicate_count += 1
@@ -253,6 +482,11 @@ class RobustTikTokProcessor:
             
             # Close the API session when done
             await api.close_sessions()
+            
+            # Explicit cleanup
+            del api
+            gc.collect()
+            
             return comments
             
         except Exception as e:
@@ -274,12 +508,7 @@ class RobustTikTokProcessor:
         try:
             print(f"🎬 Processing: {url}")
             
-            # Check for duplicates
-            if self.is_duplicate(url):
-                print(f"⏭️  Skipping duplicate: {url}")
-                self.skipped_count += 1
-                return None
-            
+            # URLs are already filtered for duplicates in main()
             # Download video first
             print(f"📥 Downloading video...")
             result = download_tiktok_video(url, **download_kwargs)
@@ -290,6 +519,10 @@ class RobustTikTokProcessor:
             
             metadata = result['metadata']
             print(f"✅ Video downloaded successfully")
+            
+            # Clean up result object to free memory
+            del result
+            gc.collect()
             
             # Extract comments if MS_TOKEN available
             if self.ms_token:
@@ -317,11 +550,27 @@ class RobustTikTokProcessor:
             
             # Mark as processed
             self.processed_urls.add(url)
+            
+            # Clean up large objects that we don't need to save
+            keys_to_remove = ['video_data', 'raw_data', 'binary_data']
+            for key in keys_to_remove:
+                if key in metadata:
+                    del metadata[key]
+            
             return metadata
             
         except Exception as e:
             print(f"❌ Error processing {url}: {e}")
             return None
+    
+    def cleanup_memory(self):
+        """Force memory cleanup"""
+        gc.collect()
+        gc.collect()  # Second pass for circular references
+        
+        if self.enable_memory_tracking:
+            current, peak = tracemalloc.get_traced_memory()
+            print(f"🧠 Memory after cleanup: Current={current/1024/1024:.1f}MB, Peak={peak/1024/1024:.1f}MB")
     
     async def process_urls(self, urls, download_kwargs):
         """Process multiple URLs with all contingencies"""
@@ -332,21 +581,15 @@ class RobustTikTokProcessor:
         print(f"⏱️  Delay between requests: {self.args.delay} seconds")
         print("="*60)
         
-        # Filter out duplicates
-        new_urls = self.filter_urls(urls)
-        
-        if not new_urls:
-            print("✅ All URLs already processed!")
-            return
-            
-        print(f"📝 Processing {len(new_urls)} new URLs")
+        # URLs are already filtered for duplicates in main()
+        print(f"📝 Processing {len(urls)} URLs")
         
         batch_metadata = []
         failed_urls = []
         
-        for i, url in enumerate(new_urls, 1):
+        for i, url in enumerate(urls, 1):
             print(f"\n{'='*60}")
-            print(f"Processing {i}/{len(new_urls)}: {url}")
+            print(f"Processing {i}/{len(urls)}: {url}")
             print(f"{'='*60}")
             
             # Save progress periodically
@@ -361,22 +604,36 @@ class RobustTikTokProcessor:
             if metadata:
                 batch_metadata.append(metadata)
                 self.successful_count += 1
-                print(f"✅ {i}/{len(new_urls)} completed successfully")
+                print(f"✅ {i}/{len(urls)} completed successfully")
             else:
                 failed_urls.append(url)
                 self.failed_count += 1
-                print(f"❌ {i}/{len(new_urls)} failed")
+                print(f"❌ {i}/{len(urls)} failed")
             
             # Auto-save batch
             if len(batch_metadata) >= self.args.batch_size:
                 print(f"\n💾 Auto-saving batch of {len(batch_metadata)} videos...")
                 append_batch_to_master_json(batch_metadata, self.master_file)
                 batch_metadata = []  # Reset batch
+                
+                # Force garbage collection after batch save
+                gc.collect()
+                
+                if self.enable_memory_tracking:
+                    current, peak = tracemalloc.get_traced_memory()
+                    print(f"💾 Memory usage: Current={current/1024/1024:.1f}MB, Peak={peak/1024/1024:.1f}MB")
             
             # Add delay between requests
-            if i < len(new_urls):
+            if i < len(urls):
                 print(f"⏱️  Waiting {self.args.delay} seconds...")
                 time.sleep(self.args.delay)
+            
+            # Periodic garbage collection every 5 videos
+            if i % 5 == 0:
+                gc.collect()
+                if self.enable_memory_tracking:
+                    current, _ = tracemalloc.get_traced_memory()
+                    print(f"🧠 Memory checkpoint: {current/1024/1024:.1f}MB in use")
         
         # Save any remaining metadata
         if batch_metadata:
@@ -440,6 +697,7 @@ async def main():
     
     # System options
     parser.add_argument("--diagnose", action="store_true", help="Diagnose CUDA environment and exit")
+    parser.add_argument("--memory-tracking", action="store_true", help="Enable memory usage tracking")
     
     args = parser.parse_args()
     
@@ -489,8 +747,7 @@ async def main():
         'audio_only': args.mp3,
         'use_whisper': args.whisper,
         'whisper_model': whisper_model,
-        'whisper_device': whisper_device,
-        'scrape_comments': False  # We handle comments separately
+        'whisper_device': whisper_device
     }
     
     # Get URLs to process
@@ -506,9 +763,24 @@ async def main():
         print("❌ No URLs to process")
         sys.exit(1)
     
+    # Filter out duplicates immediately after loading
+    original_count = len(urls)
+    urls = processor.filter_urls(urls)
+    
+    if not urls:
+        print("✅ All URLs from file already processed!")
+        print(f"📊 Total URLs in file: {original_count}")
+        print(f"📊 Already processed: {original_count}")
+        sys.exit(0)
+    
+    print(f"📊 URLs to process: {len(urls)} out of {original_count} total")
+    
     # Process URLs
     try:
         await processor.process_urls(urls, download_kwargs)
+        
+        # Auto-clean the master JSON after successful completion
+        auto_clean_master_json(processor.master_file)
         
     except KeyboardInterrupt:
         print("\n❌ Operation cancelled by user")
@@ -519,6 +791,15 @@ async def main():
         print(f"❌ Unexpected error: {e}")
         processor.save_progress()
         sys.exit(1)
+    finally:
+        # Cleanup
+        if processor.enable_memory_tracking:
+            current, peak = tracemalloc.get_traced_memory()
+            print(f"\n📊 Final memory usage: Current={current/1024/1024:.1f}MB, Peak={peak/1024/1024:.1f}MB")
+            tracemalloc.stop()
+        
+        # Force final garbage collection
+        gc.collect()
 
 
 if __name__ == "__main__":

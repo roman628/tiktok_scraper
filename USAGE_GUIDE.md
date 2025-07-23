@@ -235,3 +235,6 @@ cat download_progress.json
 6. **🤖 Unattended** - Can run overnight safely
 
 **Ready for production use on your 807 URLs!** 🚀
+
+
+./robust_master_downloader.py --from-file urls.txt --mp3 --batch-size 10 --delay 2 --max-comments 10 --whisper

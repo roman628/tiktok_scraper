@@ -1,14 +1,22 @@
 {
-  "last_updated": "2025-07-18T17:58:30.486985",
-  "processed_count": 732,
-  "successful_count": 106,
-  "failed_count": 3,
-  "skipped_count": 60,
+  "last_updated": "2025-07-22T08:31:20.296768",
+  "processed_count": 1699,
+  "successful_count": 987,
+  "failed_count": 11,
+  "skipped_count": 46,
   "failed_urls": [
-    "https://www.tiktok.com/@dailymotion17365/video/7408668505601510687",
-    "https://www.tiktok.com/@dailymotion17365/video/7408668505601510687?q=reddit%20stories&t=1752871057377#",
-    "https://www.tiktok.com/@dailymotion17365/video/7408668505601510687?q=reddit%20storytimes&t=1752869910204#"
+    "https://www.tiktok.com/@askthereddit/video/7204947907374763310",
+    "https://www.tiktok.com/@reddit.zone/video/7105609643459710251",
+    "https://www.tiktok.com/@lwb1009/video/7506154698584362271",
+    "https://www.tiktok.com/@sussy_reddit22/video/7498093633023905046",
+    "https://www.tiktok.com/@yxux541/video/7493103336606960927",
+    "https://www.tiktok.com/@ia.reddit/video/7330834223252704545",
+    "https://www.tiktok.com/@crakefunny/video/7302439696490171680",
+    "https://www.tiktok.com/@textales2/video/7445720494176734496",
+    "https://www.tiktok.com/@r3dditconfessions/video/7343884863088364830",
+    "https://www.tiktok.com/@redditrewindhd/video/7456943342266453278",
+    "https://www.tiktok.com/@redditstoriesbestdaily/video/7336557696767872289"
   ],
-  "current_url": "https://www.tiktok.com/@fluxconvos/video/7416408525506628907",
-  "ms_token_last_used": "2025-07-18T17:58:30.494474"
+  "current_url": null,
+  "ms_token_last_used": "2025-07-22T08:31:20.296844"
 }
