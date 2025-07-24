@@ -63,38 +63,58 @@ def count_master_entries(file_path="master2.json"):
             return
         
         total_entries = len(data)
-        print(f"📊 Total entries: {total_entries}")
         
-        if total_entries == 0:
-            print("📝 File is empty")
+        # Separate video entries from other entries
+        video_entries = []
+        other_entries = []
+        
+        for entry in data:
+            if isinstance(entry, dict) and 'url' in entry:
+                video_entries.append(entry)
+            else:
+                other_entries.append(entry)
+        
+        print(f"📊 Total entries in file: {total_entries}")
+        print(f"🎥 Video entries: {len(video_entries)}")
+        print(f"📝 Other entries (comments/metadata): {len(other_entries)}")
+        
+        if len(video_entries) == 0:
+            print("📝 No video entries found")
             return
         
-        # Count by uploader
+        # Count by uploader (only for video entries)
         uploaders = Counter()
         urls_with_comments = 0
         successful_downloads = 0
+        videos_with_transcription = 0
         urls = []
         
-        for entry in data:
-            if isinstance(entry, dict):
-                # Count by uploader
-                uploader = entry.get('uploader', 'unknown')
-                uploaders[uploader] += 1
-                
-                # Count comments
-                if entry.get('comments_extracted') is True:
-                    urls_with_comments += 1
-                
-                # Count successful downloads
-                if 'downloaded_at' in entry:
-                    successful_downloads += 1
-                
-                # Collect URLs
-                if 'url' in entry:
-                    urls.append(entry['url'])
+        for entry in video_entries:
+            # Count by uploader
+            uploader = entry.get('uploader', 'unknown')
+            uploaders[uploader] += 1
+            
+            # Count comments
+            if entry.get('comments_extracted') is True:
+                urls_with_comments += 1
+            
+            # Count successful downloads
+            if 'downloaded_at' in entry:
+                successful_downloads += 1
+            
+            # Count transcriptions
+            if (entry.get('whisper_transcription') or 
+                entry.get('transcription') or 
+                entry.get('subtitle') or 
+                entry.get('custom_transcription')):
+                videos_with_transcription += 1
+            
+            # Collect URLs
+            urls.append(entry['url'])
         
         print(f"✅ Successful downloads: {successful_downloads}")
         print(f"💬 Videos with comments: {urls_with_comments}")
+        print(f"🎤 Videos with transcription: {videos_with_transcription}")
         print(f"👤 Unique uploaders: {len(uploaders)}")
         
         # Show top uploaders

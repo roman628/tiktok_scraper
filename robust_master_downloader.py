@@ -17,6 +17,7 @@ import time
 import re
 import gc
 import tracemalloc
+import shutil
 from pathlib import Path
 from datetime import datetime
 from TikTokApi import TikTokApi
@@ -28,17 +29,13 @@ from tiktok_scraper import (
     get_memory_usage
 )
 
-# Import memory efficient append
-try:
-    from memory_efficient_append import append_batch_to_master_json_efficient
-    append_batch_to_master_json = append_batch_to_master_json_efficient
-except ImportError:
-    from tiktok_scraper import append_to_master_json
-    
-    def append_batch_to_master_json(metadata_list, master_file_path):
-        """Batch append using individual append function"""
-        for metadata in metadata_list:
-            append_to_master_json(metadata, master_file_path)
+# Use the reliable append method from tiktok_scraper (not the fragile streaming one)
+from tiktok_scraper import append_to_master_json
+
+def append_batch_to_master_json(metadata_list, master_file_path):
+    """Batch append using reliable atomic append function"""
+    for metadata in metadata_list:
+        append_to_master_json(metadata, master_file_path)
 
 # Import comment extraction functions
 from comment_extractor import extract_video_id_from_url, extract_comment_replies
@@ -193,15 +190,42 @@ def auto_clean_master_json(master_file_path):
         print(f"⚠️  Master file {master_file_path} not found, skipping cleanup")
         return
     
+    max_attempts = 2
+    for attempt in range(max_attempts):
+        try:
+            # Load data
+            with open(master_file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            if not isinstance(data, list):
+                print(f"⚠️  Master file is not an array, skipping cleanup")
+                return
+            break  # Success, exit retry loop
+            
+        except Exception as e:
+            print(f"❌ Error during cleanup: {e}")
+            if attempt < max_attempts - 1:  # Not the last attempt
+                print(f"🔧 Attempting to fix corrupted {master_file_path}...")
+                try:
+                    import subprocess
+                    result = subprocess.run(['python', './fix_json.py', master_file_path], 
+                                          capture_output=True, text=True, timeout=60)
+                    if result.returncode == 0:
+                        print("✅ Master JSON file fixed successfully, retrying cleanup...")
+                        continue
+                    else:
+                        print(f"❌ Failed to fix JSON: {result.stderr}")
+                        print("⚠️  Continuing without cleanup")
+                        return
+                except Exception as fix_error:
+                    print(f"❌ Error running fix_json.py: {fix_error}")
+                    print("⚠️  Continuing without cleanup")
+                    return
+            else:
+                print("⚠️  Continuing without cleanup")
+                return
+    
     try:
-        # Load data
-        with open(master_file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
-        if not isinstance(data, list):
-            print(f"⚠️  Master file is not an array, skipping cleanup")
-            return
-        
         original_count = len(data)
         print(f"📊 Original entries: {original_count}")
         
@@ -217,7 +241,6 @@ def auto_clean_master_json(master_file_path):
         if total_removed > 0:
             # Create backup
             backup_file = f"{master_file_path}.before_autoclean_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            import shutil
             shutil.copy2(master_file_path, backup_file)
             print(f"💾 Created backup: {backup_file}")
             
@@ -232,7 +255,7 @@ def auto_clean_master_json(master_file_path):
             print("✅ No cleanup needed - all entries are already valid")
             
     except Exception as e:
-        print(f"❌ Error during cleanup: {e}")
+        print(f"❌ Error during final cleanup operations: {e}")
         print("⚠️  Continuing without cleanup")
 
 
@@ -254,39 +277,70 @@ class RobustTikTokProcessor:
         # Configure garbage collection for aggressive cleanup
         gc.set_threshold(700, 10, 10)  # More aggressive GC
         
+    def fix_master_json(self):
+        """Automatically fix corrupted master2.json file"""
+        print(f"🔧 Attempting to fix corrupted {self.master_file}...")
+        try:
+            # Import and run the fix_json functionality
+            import subprocess
+            result = subprocess.run(['python', './fix_json.py', self.master_file], 
+                                  capture_output=True, text=True, timeout=60)
+            if result.returncode == 0:
+                print("✅ Master JSON file fixed successfully")
+                return True
+            else:
+                print(f"❌ Failed to fix JSON: {result.stderr}")
+                return False
+        except Exception as e:
+            print(f"❌ Error running fix_json.py: {e}")
+            return False
+
     def load_existing_progress(self):
         """Load existing URLs from master2.json and progress file"""
         print("🔍 Checking for existing progress...")
         
         # Load URLs from master2.json using streaming to avoid memory issues
         if os.path.exists(self.master_file):
-            try:
-                # Stream through the file to collect URLs without loading all data
-                with open(self.master_file, 'r', encoding='utf-8') as f:
-                    # Check if it's an array
-                    first_char = f.read(1)
-                    if first_char == '[':
-                        f.seek(0)
-                        # Use streaming JSON parser
-                        try:
-                            import ijson
-                            parser = ijson.items(f, 'item')
-                            for item in parser:
-                                if isinstance(item, dict) and 'url' in item:
-                                    self.processed_urls.add(item['url'])
-                        except ImportError:
-                            # Fallback to regular json if ijson not available
+            max_attempts = 2
+            for attempt in range(max_attempts):
+                try:
+                    # Stream through the file to collect URLs without loading all data
+                    with open(self.master_file, 'r', encoding='utf-8') as f:
+                        # Check if it's an array
+                        first_char = f.read(1)
+                        if first_char == '[':
                             f.seek(0)
-                            existing_data = json.load(f)
-                            if isinstance(existing_data, list):
-                                for item in existing_data:
+                            # Use streaming JSON parser
+                            try:
+                                import ijson
+                                parser = ijson.items(f, 'item')
+                                for item in parser:
                                     if isinstance(item, dict) and 'url' in item:
                                         self.processed_urls.add(item['url'])
-                            
-                print(f"📊 Found {len(self.processed_urls)} existing URLs in {self.master_file}")
-                gc.collect()  # Clean up after loading
-            except Exception as e:
-                print(f"⚠️  Error reading {self.master_file}: {e}")
+                            except ImportError:
+                                # Fallback to regular json if ijson not available
+                                f.seek(0)
+                                existing_data = json.load(f)
+                                if isinstance(existing_data, list):
+                                    for item in existing_data:
+                                        if isinstance(item, dict) and 'url' in item:
+                                            self.processed_urls.add(item['url'])
+                                
+                    print(f"📊 Found {len(self.processed_urls)} existing URLs in {self.master_file}")
+                    gc.collect()  # Clean up after loading
+                    break  # Success, exit the retry loop
+                    
+                except Exception as e:
+                    print(f"⚠️  Error reading {self.master_file}: {e}")
+                    if attempt < max_attempts - 1:  # Not the last attempt
+                        if self.fix_master_json():
+                            print("🔄 Retrying to load existing progress...")
+                            continue
+                        else:
+                            print("❌ Could not fix master JSON, continuing without existing progress")
+                            break
+                    else:
+                        print("❌ Final attempt failed, continuing without existing progress")
         
         # Load progress file for additional tracking
         if os.path.exists(self.progress_file):
@@ -414,8 +468,52 @@ class RobustTikTokProcessor:
         return False
     
     def is_duplicate(self, url):
-        """Check if URL has already been processed"""
-        return url in self.processed_urls
+        """Check if URL has already been processed - MEMORY OPTIMIZED"""
+        # First check in-memory set
+        if url in self.processed_urls:
+            return True
+        
+        # Use cached file URLs if available
+        if hasattr(self, '_cached_file_urls'):
+            if url in self._cached_file_urls:
+                self.processed_urls.add(url)
+                return True
+        
+        # If cache doesn't exist or is stale, rebuild it
+        if not hasattr(self, '_cached_file_urls') or not hasattr(self, '_cache_timestamp'):
+            self._rebuild_url_cache()
+        
+        # Check cache again after rebuild
+        if url in self._cached_file_urls:
+            self.processed_urls.add(url)
+            return True
+        
+        return False
+    
+    def _rebuild_url_cache(self):
+        """Rebuild URL cache from master file - MEMORY OPTIMIZED"""
+        self._cached_file_urls = set()
+        self._cache_timestamp = time.time()
+        
+        if not os.path.exists(self.master_file):
+            return
+        
+        try:
+            # Stream through file line by line instead of loading entire content
+            with open(self.master_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if '"url":' in line:
+                        # Extract URL using regex instead of JSON parsing
+                        import re
+                        match = re.search(r'"url":\s*"([^"]+)"', line)
+                        if match:
+                            self._cached_file_urls.add(match.group(1))
+            
+            print(f"🔄 Rebuilt URL cache with {len(self._cached_file_urls)} URLs")
+            
+        except Exception as e:
+            print(f"⚠️  Error rebuilding URL cache: {e}")
+            self._cached_file_urls = set()
     
     def filter_urls(self, urls):
         """Filter out already processed URLs"""
@@ -437,7 +535,7 @@ class RobustTikTokProcessor:
         return new_urls
     
     async def extract_video_comments_safe(self, url, max_comments=10):
-        """Safely extract comments with error handling"""
+        """Safely extract comments with error handling - MEMORY OPTIMIZED"""
         if not self.ms_token:
             return []
             
@@ -447,17 +545,20 @@ class RobustTikTokProcessor:
                 print(f"❌ Could not extract video ID from URL: {url}")
                 return []
             
-            # Create a fresh API session for each comment extraction
-            api = TikTokApi()
-            await api.create_sessions(
-                ms_tokens=[self.ms_token], 
-                num_sessions=1, 
-                sleep_after=1,
-                suppress_resource_load_types=["image", "media", "font", "stylesheet"]
-            )
+            # Reuse existing API session if available, otherwise create new one
+            if not hasattr(self, '_api_session') or not self._api_session:
+                print("🔄 Creating new TikTokApi session...")
+                self._api_session = TikTokApi()
+                await self._api_session.create_sessions(
+                    ms_tokens=[self.ms_token], 
+                    num_sessions=1, 
+                    sleep_after=1,
+                    suppress_resource_load_types=["image", "media", "font", "stylesheet"]
+                )
+                print("✅ TikTokApi session created")
             
             comments = []
-            async for comment in api.video(id=video_id).comments(count=max_comments):
+            async for comment in self._api_session.video(id=video_id).comments(count=max_comments):
                 comment_data = {
                     "comment_id": comment.id,
                     "username": comment.as_dict.get("user", {}).get("unique_id", "unknown"),
@@ -467,24 +568,23 @@ class RobustTikTokProcessor:
                     "timestamp": comment.as_dict.get("create_time", 0)
                 }
                 
-                # Get replies if they exist
+                # Get replies if they exist (limit to save memory)
                 reply_count = comment.as_dict.get("reply_comment_count", 0)
                 if reply_count > 0:
-                    replies = await extract_comment_replies(comment, max_replies=3)
+                    replies = await extract_comment_replies(comment, max_replies=2)  # Reduced from 3 to 2
                     if replies:
                         comment_data["replies"] = replies
                         comment_data["reply_count"] = len(replies)
                 
                 comments.append(comment_data)
                 
+                # Clear comment object to free memory
+                del comment
+                
                 if len(comments) >= max_comments:
                     break
             
-            # Close the API session when done
-            await api.close_sessions()
-            
-            # Explicit cleanup
-            del api
+            # Force garbage collection after comment extraction
             gc.collect()
             
             return comments
@@ -495,6 +595,8 @@ class RobustTikTokProcessor:
             # Check for token expiry indicators
             if any(indicator in error_msg for indicator in ['token', 'auth', 'forbidden', 'unauthorized']):
                 print(f"🔄 Possible token expiry detected: {e}")
+                # Close current session on token expiry
+                await self.cleanup_api_session()
                 if await self.handle_token_expiry():
                     # Retry with new token
                     return await self.extract_video_comments_safe(url, max_comments)
@@ -505,20 +607,33 @@ class RobustTikTokProcessor:
     
     async def download_and_extract_comments(self, url, download_kwargs, max_comments=10):
         """Download video and extract comments with full error handling"""
+        video_dir_to_cleanup = None
         try:
             print(f"🎬 Processing: {url}")
             
-            # URLs are already filtered for duplicates in main()
+            # Double-check if URL is duplicate (in case it was added during current session)
+            if self.is_duplicate(url):
+                print(f"⏭️  Skipping duplicate URL: {url}")
+                self.skipped_count += 1
+                return None
+            
             # Download video first
             print(f"📥 Downloading video...")
             result = download_tiktok_video(url, **download_kwargs)
             
             if not result['success']:
                 print(f"❌ Video download failed: {result.get('error', 'Unknown error')}")
+                # Try to clean up any directory that might have been created
+                if 'metadata' in result and result['metadata'] and 'title' in result['metadata']:
+                    video_dir_to_cleanup = os.path.join(download_kwargs.get('output_dir', 'downloads'), result['metadata']['title'])
                 return None
             
             metadata = result['metadata']
             print(f"✅ Video downloaded successfully")
+            
+            # Set cleanup directory for successful downloads
+            if 'title' in metadata and download_kwargs.get('output_dir'):
+                video_dir_to_cleanup = os.path.join(download_kwargs['output_dir'], metadata['title'])
             
             # Clean up result object to free memory
             del result
@@ -557,11 +672,20 @@ class RobustTikTokProcessor:
                 if key in metadata:
                     del metadata[key]
             
+            
             return metadata
             
         except Exception as e:
             print(f"❌ Error processing {url}: {e}")
             return None
+        finally:
+            # Always try to clean up video directory, regardless of success/failure
+            if video_dir_to_cleanup and os.path.exists(video_dir_to_cleanup):
+                try:
+                    shutil.rmtree(video_dir_to_cleanup)
+                    print(f"🗑️  Cleaned up: {video_dir_to_cleanup}")
+                except Exception as e:
+                    print(f"⚠️  Failed to clean up {video_dir_to_cleanup}: {e}")
     
     def cleanup_memory(self):
         """Force memory cleanup"""
@@ -571,6 +695,52 @@ class RobustTikTokProcessor:
         if self.enable_memory_tracking:
             current, peak = tracemalloc.get_traced_memory()
             print(f"🧠 Memory after cleanup: Current={current/1024/1024:.1f}MB, Peak={peak/1024/1024:.1f}MB")
+    
+    async def aggressive_memory_cleanup(self):
+        """Aggressive memory cleanup - MEMORY OPTIMIZED"""
+        print("🧹 Performing aggressive memory cleanup...")
+        
+        # Multiple garbage collection passes
+        for _ in range(3):
+            gc.collect()
+        
+        # Clear URL cache periodically to prevent it from growing too large
+        if hasattr(self, '_cached_file_urls') and len(self._cached_file_urls) > 1000:
+            print(f"🔄 Clearing URL cache ({len(self._cached_file_urls)} URLs)")
+            delattr(self, '_cached_file_urls')
+            delattr(self, '_cache_timestamp')
+    
+    async def cleanup_api_session(self):
+        """Cleanup TikTokApi session - MEMORY OPTIMIZED"""
+        if hasattr(self, '_api_session') and self._api_session:
+            try:
+                await self._api_session.close_sessions()
+                if hasattr(self._api_session, 'playwright') and self._api_session.playwright:
+                    await self._api_session.playwright.stop()
+                del self._api_session
+                print("🧹 Cleaned up TikTokApi session")
+            except Exception as e:
+                print(f"⚠️  Error cleaning up API session: {e}")
+            finally:
+                self._api_session = None
+    
+    async def restart_api_session(self):
+        """Restart TikTokApi session - MEMORY OPTIMIZED"""
+        print("🔄 Restarting TikTokApi session due to high memory usage...")
+        await self.cleanup_api_session()
+        gc.collect()
+        # Session will be recreated on next comment extraction
+    
+    async def cleanup_browser_processes(self):
+        """Kill orphaned browser processes - MEMORY OPTIMIZED"""
+        try:
+            import subprocess
+            result = subprocess.run(['pkill', '-f', 'chromium'], capture_output=True)
+            result2 = subprocess.run(['pkill', '-f', 'chrome'], capture_output=True)
+            result3 = subprocess.run(['pkill', '-f', 'playwright'], capture_output=True)
+            print(f"🧹 Killed orphaned browser processes")
+        except Exception as e:
+            print(f"⚠️  Error killing browser processes: {e}")
     
     async def process_urls(self, urls, download_kwargs):
         """Process multiple URLs with all contingencies"""
@@ -592,7 +762,7 @@ class RobustTikTokProcessor:
             print(f"Processing {i}/{len(urls)}: {url}")
             print(f"{'='*60}")
             
-            # Save progress periodically
+            # Save progress periodically (every 5 videos)
             if i % 5 == 0:
                 self.save_progress(failed_urls, url)
             
@@ -610,13 +780,13 @@ class RobustTikTokProcessor:
                 self.failed_count += 1
                 print(f"❌ {i}/{len(urls)} failed")
             
-            # Auto-save batch
-            if len(batch_metadata) >= self.args.batch_size:
-                print(f"\n💾 Auto-saving batch of {len(batch_metadata)} videos...")
+            # Auto-save after every video
+            if len(batch_metadata) >= 1:
+                print(f"💾 Saving video to master2.json...")
                 append_batch_to_master_json(batch_metadata, self.master_file)
                 batch_metadata = []  # Reset batch
                 
-                # Force garbage collection after batch save
+                # Force garbage collection after save
                 gc.collect()
                 
                 if self.enable_memory_tracking:
@@ -628,20 +798,42 @@ class RobustTikTokProcessor:
                 print(f"⏱️  Waiting {self.args.delay} seconds...")
                 time.sleep(self.args.delay)
             
-            # Periodic garbage collection every 5 videos
-            if i % 5 == 0:
-                gc.collect()
+            # AGGRESSIVE cleanup every 3 videos to prevent memory explosion
+            if i % 3 == 0:
+                await self.aggressive_memory_cleanup()
+                
+                # Force memory cleanup
+                try:
+                    import psutil
+                    process = psutil.Process()
+                    memory_mb = process.memory_info().rss / 1024 / 1024
+                    print(f"🧠 Process memory: {memory_mb:.1f}MB")
+                    
+                    # Kill orphaned browser processes if memory is high (lowered threshold)
+                    if memory_mb > 500:  # If over 500MB (reduced from 1GB)
+                        await self.cleanup_browser_processes()
+                        
+                        # Restart API session if memory is still high
+                        if memory_mb > 800:  # If over 800MB, restart session
+                            await self.restart_api_session()
+                    
+                except ImportError:
+                    pass  # psutil not available
+                
                 if self.enable_memory_tracking:
                     current, _ = tracemalloc.get_traced_memory()
                     print(f"🧠 Memory checkpoint: {current/1024/1024:.1f}MB in use")
         
-        # Save any remaining metadata
+        # Save any remaining metadata (shouldn't be any with per-video saving)
         if batch_metadata:
             print(f"\n💾 Saving final batch of {len(batch_metadata)} videos...")
             append_batch_to_master_json(batch_metadata, self.master_file)
         
         # Final progress save
         self.save_progress(failed_urls)
+        
+        # Cleanup API session on completion - MEMORY OPTIMIZED
+        await self.cleanup_api_session()
         
         print(f"\n🎉 Processing completed!")
         print(f"✅ Successful: {self.successful_count}")
@@ -694,6 +886,7 @@ async def main():
     # Resume options
     parser.add_argument("--force-redownload", action="store_true", help="Redownload all URLs (ignore duplicates)")
     parser.add_argument("--clean-progress", action="store_true", help="Clean progress file and start fresh")
+    parser.add_argument("--clean-old-downloads", action="store_true", help="Clean up old download directories before starting")
     
     # System options
     parser.add_argument("--diagnose", action="store_true", help="Diagnose CUDA environment and exit")
@@ -718,6 +911,20 @@ async def main():
     if args.clean_progress and os.path.exists(processor.progress_file):
         os.remove(processor.progress_file)
         print("🧹 Cleaned progress file")
+    
+    # Clean old downloads if requested
+    if args.clean_old_downloads and os.path.exists(args.output):
+        print(f"🧹 Cleaning old downloads from {args.output}...")
+        try:
+            # List all directories in downloads
+            for item in os.listdir(args.output):
+                item_path = os.path.join(args.output, item)
+                if os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+                    print(f"  🗑️  Removed: {item}")
+            print(f"✅ Cleaned all directories from {args.output}")
+        except Exception as e:
+            print(f"❌ Error cleaning downloads: {e}")
     
     # Load existing progress (unless forced redownload)
     if not args.force_redownload:

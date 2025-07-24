@@ -345,6 +345,9 @@ def download_single_video(url, output_dir="downloads", quality="best", audio_onl
                 'preferredcodec': 'mp3',
                 'preferredquality': '128',
             }]
+            # Keep video file if we need it for Whisper transcription
+            if use_whisper and whisper_model:
+                ydl_opts['keepvideo'] = True
         else:
             ydl_opts['format'] = quality
         
@@ -352,8 +355,8 @@ def download_single_video(url, output_dir="downloads", quality="best", audio_onl
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
         
-        # Whisper transcription if requested
-        if use_whisper and whisper_model and not audio_only:
+        # Whisper transcription if requested (works even with audio_only=True)
+        if use_whisper and whisper_model:
             video_file = None
             for file in video_folder.iterdir():
                 if file.suffix.lower() in ['.mp4', '.webm', '.mkv']:
@@ -361,11 +364,19 @@ def download_single_video(url, output_dir="downloads", quality="best", audio_onl
                     break
             
             if video_file:
-                custom_transcription = transcribe_with_whisper(str(video_file), whisper_model, whisper_device)
-                if custom_transcription:
-                    metadata['custom_transcription'] = custom_transcription
+                whisper_transcription = transcribe_with_whisper(str(video_file), whisper_model, whisper_device)
+                if whisper_transcription:
+                    metadata['whisper_transcription'] = whisper_transcription
                     metadata['transcription_timestamp'] = datetime.now().isoformat()
-                    print(f"✅ Whisper transcription completed ({len(custom_transcription)} chars)")
+                    print(f"✅ Whisper transcription completed ({len(whisper_transcription)} chars)")
+                
+                # Clean up video file after transcription if we're in audio_only mode
+                if audio_only:
+                    try:
+                        video_file.unlink()
+                        print(f"🗑️  Cleaned up video file after transcription: {video_file.name}")
+                    except Exception as e:
+                        print(f"⚠️  Failed to clean up video file: {e}")
         
         # Save metadata
         metadata_file = video_folder / "metadata.json"

@@ -1,0 +1,7 @@
+{
+  "name": "tiktok_url_collector",
+  "description": "TikTok URL Collector Native Messaging Host",
+  "path": "/Users/ethan/tiktok_scraper/firefox_extension/native_host.py",
+  "type": "stdio",
+  "allowed_extensions": ["tiktok-url-collector@tiktokscraper.local"]
+}

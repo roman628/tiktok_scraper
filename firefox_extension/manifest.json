@@ -1,0 +1,50 @@
+{
+  "manifest_version": 2,
+  "name": "TikTok URL Collector",
+  "version": "1.0",
+  "description": "Automatically captures TikTok URLs and adds them to urls.txt",
+  
+  "applications": {
+    "gecko": {
+      "id": "tiktok-url-collector@tiktokscraper.local"
+    }
+  },
+
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "*://www.tiktok.com/*",
+    "http://localhost:8765/*"
+  ],
+
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": false
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["*://www.tiktok.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+
+  "browser_action": {
+    "default_popup": "popup.html",
+    "default_title": "TikTok URL Collector",
+    "default_icon": {
+      "16": "icon-16.png",
+      "32": "icon-32.png",
+      "48": "icon-48.png",
+      "128": "icon-128.png"
+    }
+  },
+
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  }
+}
