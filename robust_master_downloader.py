@@ -22,23 +22,18 @@ from pathlib import Path
 from datetime import datetime
 from TikTokApi import TikTokApi
 
-# Import the video downloader functions
-from tiktok_scraper import (
-    download_single_video as download_tiktok_video, 
-    load_whisper_model,
-    get_memory_usage
-)
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Use the reliable append method from tiktok_scraper (not the fragile streaming one)
-from tiktok_scraper import append_to_master_json
+from scripts.collection.tiktok_scraper import download_single_video as download_tiktok_video
+from scripts.collection.tiktok_scraper import load_whisper_model, get_memory_usage
+from scripts.utils.memory_efficient_append import append_batch_to_master_json_efficient as append_to_master_json
 
 def append_batch_to_master_json(metadata_list, master_file_path):
     """Batch append using reliable atomic append function"""
-    for metadata in metadata_list:
-        append_to_master_json(metadata, master_file_path)
+    append_to_master_json(metadata_list, master_file_path)
 
-# Import comment extraction functions
-from comment_extractor import extract_video_id_from_url, extract_comment_replies
+from scripts.analysis.comment_extractor import extract_video_id_from_url, extract_comment_replies
 
 
 def has_transcription_with_min_length(entry, min_length=50):
@@ -398,18 +393,22 @@ class RobustTikTokProcessor:
             print("✅ MS_TOKEN found in environment variable")
         else:
             # Get from user input
-            while True:
-                token = input("Enter your MS_TOKEN (or 'skip' to download without comments): ").strip()
-                
-                if token.lower() == 'skip':
-                    print("⚠️  Skipping comment extraction - will only download videos")
-                    return False
-                
-                if len(token) > 50:  # Basic validation
-                    self.ms_token = token
-                    break
-                else:
-                    print("❌ Invalid token format. Please try again.")
+            if sys.stdout.isatty():
+                while True:
+                    token = input("Enter your MS_TOKEN (or 'skip' to download without comments): ").strip()
+                    
+                    if token.lower() == 'skip':
+                        print("⚠️  Skipping comment extraction - will only download videos")
+                        return False
+                    
+                    if len(token) > 50:  # Basic validation
+                        self.ms_token = token
+                        break
+                    else:
+                        print("❌ Invalid token format. Please try again.")
+            else:
+                print("⚠️  Skipping comment extraction - MS_TOKEN not provided and not in an interactive terminal")
+                return False
         
         return True
     
@@ -888,6 +887,8 @@ async def main():
     parser.add_argument("--clean-progress", action="store_true", help="Clean progress file and start fresh")
     parser.add_argument("--clean-old-downloads", action="store_true", help="Clean up old download directories before starting")
     
+    parser.add_argument("--proxy", type=str, help="Proxy to use for downloads (e.g., http://user:pass@host:port)")
+    
     # System options
     parser.add_argument("--diagnose", action="store_true", help="Diagnose CUDA environment and exit")
     parser.add_argument("--memory-tracking", action="store_true", help="Enable memory usage tracking")
@@ -901,8 +902,17 @@ async def main():
     
     # Validate arguments
     if not args.url and not args.from_file:
-        print("❌ Either provide a URL or use --from-file")
-        sys.exit(1)
+        # If no arguments are provided, use default settings
+        if len(sys.argv) == 1:
+            args.from_file = 'urls.txt'
+            args.mp3 = True
+            args.batch_size = 10
+            args.delay = 2
+            args.max_comments = 10
+            args.whisper = True
+        else:
+            print("❌ Either provide a URL or use --from-file")
+            sys.exit(1)
     
     # Initialize processor
     processor = RobustTikTokProcessor(args)
@@ -954,7 +964,8 @@ async def main():
         'audio_only': args.mp3,
         'use_whisper': args.whisper,
         'whisper_model': whisper_model,
-        'whisper_device': whisper_device
+        'whisper_device': whisper_device,
+        'proxy': args.proxy
     }
     
     # Get URLs to process

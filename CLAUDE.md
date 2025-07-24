@@ -1,36 +1,46 @@
-- NEVER write fallbacks
-- Design personal diagnostic tools to comprehensively understand system mechanics:
-  * Create step-by-step tracing mechanisms
-  * Implement verbose logging for each component
-  * Build interactive debug interfaces
-  * Develop recursive error analysis tools
-  * Construct dependency mapping visualizations
+# TikTok Scraper Project
 
-# TikTok Scraper Commands
+This project is designed to download and process TikTok videos.
 
-## Main Download Command
+## Main Script
+
+The main script for this project is `robust_master_downloader.py`. It can be run with specific arguments, or with no arguments to use the default settings.
+
+### Default Settings
+
+When run with no arguments, the script will:
+- Read URLs from `urls.txt`
+- Download audio only as MP3
+- Use a batch size of 10
+- Have a delay of 2 seconds between downloads
+- Download a maximum of 10 comments per video
+- Use whisper for transcription
+
+### Usage
+
+To run with default settings:
 ```bash
-./robust_master_downloader.py --from-file urls.txt --mp3 --batch-size 10 --delay 2 --max-comments 10 --whisper
+./robust_master_downloader.py
 ```
 
-## Maintenance Scripts
+To run with custom settings, use the available flags. For example:
 ```bash
-# Count entries in master2.json
-./count_master.py
-
-# Fix corrupted JSON (creates automatic backup)
-./fix_json.py master2.json
-
-# Remove duplicate URLs (creates automatic backup)
-./remove_duplicates.py master2.json
-
-# Remove entries with no transcription (creates automatic backup)
-./clean_no_transcription.py --dry-run  # Preview what would be removed
-./clean_no_transcription.py --force master2.json  # Remove without confirmation
+./robust_master_downloader.py --from-file my_urls.txt --quality best
 ```
 
-## Notes
-- Master database: `master2.json` (currently 959 entries)
-- Duplicate checking happens automatically during initialization
-- Ctrl+C works properly (signal handler disabled in tiktok_scraper.py)
-- Memory management: Aggressive garbage collection enabled
+## Maintenance and Utility Scripts
+
+All other scripts are located in the `scripts` directory, organized by category.
+
+To run any of these scripts, use the `ttools.py` interactive script:
+```bash
+python ttools.py
+```
+This will display a list of available scripts and allow you to choose which one to run.
+
+### Script Categories
+
+- **analysis**: Scripts for analyzing the downloaded data.
+- **cleanup**: Scripts for cleaning and maintaining the data.
+- **collection**: Scripts for collecting data from TikTok.
+- **utils**: Utility scripts for various tasks.
