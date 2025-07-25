@@ -21,6 +21,15 @@ import shutil
 import subprocess
 import platform
 import signal
+import multiprocessing as mp
+try:
+    import fcntl  # Unix file locking
+except ImportError:
+    fcntl = None
+try:
+    import msvcrt  # Windows file locking
+except ImportError:
+    msvcrt = None
 from pathlib import Path
 from datetime import datetime
 from TikTokApi import TikTokApi
@@ -255,6 +264,81 @@ def auto_clean_master_json(master_file_path):
     except Exception as e:
         print(f"❌ Error during final cleanup operations: {e}")
         print("⚠️  Continuing without cleanup")
+
+
+class FileLock:
+    """Cross-platform file locking for safe concurrent access"""
+    
+    def __init__(self, filepath):
+        self.filepath = filepath
+        self.lock_file = None
+        
+    def __enter__(self):
+        self.acquire()
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+        
+    def acquire(self, timeout=30):
+        """Acquire file lock with timeout"""
+        lock_path = f"{self.filepath}.lock"
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                if platform.system() == 'Windows' and msvcrt:
+                    self.lock_file = open(lock_path, 'w')
+                    msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                    return True
+                elif fcntl:
+                    self.lock_file = open(lock_path, 'w')
+                    fcntl.lockf(self.lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return True
+                else:
+                    # Fallback: basic file existence check
+                    if not os.path.exists(lock_path):
+                        self.lock_file = open(lock_path, 'w')
+                        self.lock_file.write(str(os.getpid()))
+                        self.lock_file.flush()
+                        return True
+                    
+            except (IOError, OSError):
+                time.sleep(0.1)
+                continue
+                
+        raise TimeoutError(f"Could not acquire lock for {self.filepath}")
+    
+    def release(self):
+        """Release file lock"""
+        if self.lock_file:
+            try:
+                if platform.system() == 'Windows' and msvcrt:
+                    msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                elif fcntl:
+                    fcntl.lockf(self.lock_file.fileno(), fcntl.LOCK_UN)
+                    
+                self.lock_file.close()
+                
+                # Remove lock file
+                lock_path = f"{self.filepath}.lock"
+                if os.path.exists(lock_path):
+                    os.remove(lock_path)
+                    
+            except (IOError, OSError):
+                pass  # Ignore cleanup errors
+            finally:
+                self.lock_file = None
+
+
+def append_batch_to_master_json_safe(metadata_list, master_file_path):
+    """Thread-safe version of batch append for multiprocessing"""
+    if not metadata_list:
+        return
+        
+    with FileLock(master_file_path):
+        # Use the existing memory-efficient append function
+        append_to_master_json(metadata_list, master_file_path)
 
 
 class RobustTikTokProcessor:
@@ -967,6 +1051,396 @@ class RobustTikTokProcessor:
             print(f"🗑️  Removed {len(self.failed_urls)} failed URLs from {self.source_file}")
 
 
+class WorkerProcessor:
+    """Simplified processor for individual worker processes"""
+    
+    def __init__(self, worker_id, ms_token, args):
+        self.worker_id = worker_id
+        self.ms_token = ms_token
+        self.args = args
+        self.successful_count = 0
+        self.failed_count = 0
+        self.skipped_count = 0
+        self.progress_file = f"download_progress_worker_{worker_id}.json"
+        self.shutdown_event = None  # Will be set by coordinator
+        
+        # Load whisper model if needed
+        self.whisper_model = None
+        self.whisper_device = "CPU"
+        if args.whisper:
+            from scripts.collection.tiktok_scraper import load_whisper_model
+            print(f"🎤 Worker {worker_id}: Loading whisper model...")
+            self.whisper_model, self.whisper_device = load_whisper_model(force_cpu=args.force_cpu)
+            if self.whisper_model:
+                print(f"✅ Worker {worker_id}: Whisper model loaded on {self.whisper_device}")
+            else:
+                print(f"❌ Worker {worker_id}: Failed to load whisper model")
+    
+    def save_progress(self, processed_urls, failed_urls, current_url=None):
+        """Save worker progress"""
+        progress_data = {
+            "worker_id": self.worker_id,
+            "last_updated": datetime.now().isoformat(),
+            "processed_count": len(processed_urls),
+            "successful_count": self.successful_count,
+            "failed_count": self.failed_count,
+            "skipped_count": self.skipped_count,
+            "failed_urls": list(failed_urls),
+            "processed_urls": list(processed_urls),
+            "current_url": current_url
+        }
+        
+        try:
+            with open(self.progress_file, 'w', encoding='utf-8') as f:
+                json.dump(progress_data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"⚠️  Worker {self.worker_id}: Failed to save progress: {e}")
+    
+    async def extract_video_comments_safe(self, url, max_comments=10):
+        """Extract comments for a single video"""
+        if not self.ms_token:
+            return []
+            
+        try:
+            from scripts.analysis.comment_extractor import extract_video_id_from_url, extract_comment_replies
+            from TikTokApi import TikTokApi
+            
+            video_id = extract_video_id_from_url(url)
+            if not video_id:
+                return []
+            
+            # Create API session
+            api = TikTokApi()
+            await api.create_sessions(
+                ms_tokens=[self.ms_token], 
+                num_sessions=1, 
+                sleep_after=1,
+                suppress_resource_load_types=["image", "media", "font", "stylesheet"]
+            )
+            
+            comments = []
+            comment_iter = api.video(id=video_id).comments(count=max_comments)
+            
+            async for comment in comment_iter:
+                if self.shutdown_event and self.shutdown_event.is_set():
+                    break
+                    
+                comment_data = {
+                    "comment_id": comment.id,
+                    "username": comment.as_dict.get("user", {}).get("unique_id", "unknown"),
+                    "display_name": comment.as_dict.get("user", {}).get("nickname", "unknown"),
+                    "comment_text": comment.as_dict.get("text", ""),
+                    "like_count": comment.as_dict.get("digg_count", 0),
+                    "timestamp": comment.as_dict.get("create_time", 0)
+                }
+                
+                # Get replies if they exist
+                reply_count = comment.as_dict.get("reply_comment_count", 0)
+                if reply_count > 0:
+                    replies = await extract_comment_replies(comment, max_replies=2)
+                    if replies:
+                        comment_data["replies"] = replies
+                        comment_data["reply_count"] = len(replies)
+                
+                comments.append(comment_data)
+                
+                if len(comments) >= max_comments:
+                    break
+            
+            # Clean up session
+            await api.close_sessions()
+            gc.collect()
+            
+            return comments
+            
+        except Exception as e:
+            print(f"❌ Worker {self.worker_id}: Comment extraction failed for {url}: {e}")
+            return []
+    
+    async def process_urls(self, urls, download_kwargs, master_file):
+        """Process assigned URLs for this worker"""
+        print(f"🚀 Worker {self.worker_id}: Starting with {len(urls)} URLs")
+        
+        processed_urls = set()
+        failed_urls = set()
+        batch_metadata = []
+        
+        for i, url in enumerate(urls, 1):
+            # Check for shutdown
+            if self.shutdown_event and self.shutdown_event.is_set():
+                print(f"🚨 Worker {self.worker_id}: Shutdown requested")
+                break
+            
+            try:
+                print(f"🎬 Worker {self.worker_id}: Processing {i}/{len(urls)}: {url}")
+                
+                # Download video
+                from scripts.collection.tiktok_scraper import download_single_video as download_tiktok_video
+                
+                # Update download_kwargs with worker-specific whisper model
+                worker_download_kwargs = download_kwargs.copy()
+                worker_download_kwargs['whisper_model'] = self.whisper_model
+                worker_download_kwargs['whisper_device'] = self.whisper_device
+                
+                result = download_tiktok_video(url, **worker_download_kwargs)
+                
+                if not result['success']:
+                    print(f"❌ Worker {self.worker_id}: Video download failed: {result.get('error', 'Unknown error')}")
+                    failed_urls.add(url)
+                    self.failed_count += 1
+                    continue
+                
+                metadata = result['metadata']
+                processed_urls.add(url)
+                
+                # Extract comments if MS_TOKEN available
+                if self.ms_token:
+                    comments = await self.extract_video_comments_safe(url, self.args.max_comments)
+                    if comments:
+                        metadata['top_comments'] = comments
+                        metadata['comments_extracted'] = True
+                        metadata['comments_extracted_at'] = datetime.now().isoformat()
+                    else:
+                        metadata['top_comments'] = []
+                        metadata['comments_extracted'] = False
+                else:
+                    metadata['top_comments'] = []
+                    metadata['comments_extracted'] = False
+                
+                # Clean up large objects
+                keys_to_remove = ['video_data', 'raw_data', 'binary_data']
+                for key in keys_to_remove:
+                    if key in metadata:
+                        del metadata[key]
+                
+                batch_metadata.append(metadata)
+                self.successful_count += 1
+                
+                # Save immediately to master file
+                if batch_metadata:
+                    append_batch_to_master_json_safe(batch_metadata, master_file)
+                    batch_metadata = []
+                
+                # Save progress every 5 videos
+                if i % 5 == 0:
+                    self.save_progress(processed_urls, failed_urls, url)
+                
+                # Add delay between requests
+                if i < len(urls):
+                    time.sleep(self.args.delay)
+                
+                # Cleanup every 3 videos
+                if i % 3 == 0:
+                    gc.collect()
+                    
+            except Exception as e:
+                print(f"❌ Worker {self.worker_id}: Error processing {url}: {e}")
+                failed_urls.add(url)
+                self.failed_count += 1
+        
+        # Final progress save
+        self.save_progress(processed_urls, failed_urls)
+        
+        print(f"✅ Worker {self.worker_id}: Completed - Success: {self.successful_count}, Failed: {self.failed_count}")
+        return self.successful_count, self.failed_count, list(failed_urls)
+
+
+def worker_function(worker_id, urls, ms_token, args, download_kwargs, master_file, shutdown_event):
+    """Worker function to run in separate process"""
+    try:
+        # Create worker processor
+        worker = WorkerProcessor(worker_id, ms_token, args)
+        worker.shutdown_event = shutdown_event
+        
+        # Run the async processing
+        result = asyncio.run(worker.process_urls(urls, download_kwargs, master_file))
+        return result
+        
+    except Exception as e:
+        print(f"❌ Worker {worker_id}: Fatal error: {e}")
+        return 0, len(urls), urls  # All URLs failed
+
+
+class MultiprocessCoordinator:
+    """Coordinates multiple worker processes for parallel processing"""
+    
+    def __init__(self, args, ms_token):
+        self.args = args
+        self.ms_token = ms_token
+        self.num_workers = args.workers
+        self.shutdown_event = mp.Event()
+        self.workers = []
+        self.total_successful = 0
+        self.total_failed = 0
+        self.all_failed_urls = set()
+        
+        # Setup signal handlers for graceful shutdown
+        self.setup_signal_handlers()
+    
+    def setup_signal_handlers(self):
+        """Setup signal handlers for graceful shutdown"""
+        def signal_handler(signum, frame):
+            print(f"\n🚨 Graceful shutdown requested (signal {signum})")
+            self.shutdown_event.set()
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, signal_handler)
+    
+    def distribute_urls(self, urls):
+        """Distribute URLs among workers"""
+        if self.num_workers == 1:
+            return [urls]
+        
+        chunk_size = len(urls) // self.num_workers
+        url_chunks = []
+        
+        for i in range(self.num_workers):
+            start_idx = i * chunk_size
+            if i == self.num_workers - 1:  # Last worker gets remaining URLs
+                end_idx = len(urls)
+            else:
+                end_idx = (i + 1) * chunk_size
+            
+            chunk = urls[start_idx:end_idx]
+            if chunk:  # Only add non-empty chunks
+                url_chunks.append(chunk)
+        
+        return url_chunks
+    
+    def cleanup_worker_progress_files(self):
+        """Clean up worker progress files"""
+        for i in range(self.num_workers):
+            progress_file = f"download_progress_worker_{i}.json"
+            if os.path.exists(progress_file):
+                try:
+                    os.remove(progress_file)
+                except Exception:
+                    pass  # Ignore cleanup errors
+    
+    def aggregate_worker_progress(self):
+        """Aggregate progress from all worker files"""
+        total_success = 0
+        total_failed = 0
+        all_failed_urls = set()
+        
+        for i in range(self.num_workers):
+            progress_file = f"download_progress_worker_{i}.json"
+            if os.path.exists(progress_file):
+                try:
+                    with open(progress_file, 'r', encoding='utf-8') as f:
+                        progress_data = json.load(f)
+                        total_success += progress_data.get('successful_count', 0)
+                        total_failed += progress_data.get('failed_count', 0)
+                        all_failed_urls.update(progress_data.get('failed_urls', []))
+                except Exception as e:
+                    print(f"⚠️  Error reading worker {i} progress: {e}")
+        
+        return total_success, total_failed, all_failed_urls
+    
+    def remove_failed_urls_from_source(self, source_file, failed_urls):
+        """Remove failed URLs from source file"""
+        if not source_file or not os.path.exists(source_file) or not failed_urls:
+            return
+            
+        try:
+            # Read current URLs
+            with open(source_file, 'r', encoding='utf-8') as f:
+                current_urls = [line.strip() for line in f if line.strip()]
+            
+            # Remove failed URLs
+            remaining_urls = [url for url in current_urls if url not in failed_urls]
+            
+            if len(remaining_urls) < len(current_urls):
+                # Write back the cleaned URLs
+                temp_file = f"{source_file}.tmp"
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    for url in remaining_urls:
+                        f.write(url + '\n')
+                
+                # Atomic replace
+                if platform.system() == "Windows":
+                    if os.path.exists(source_file):
+                        os.replace(temp_file, source_file)
+                else:
+                    os.rename(temp_file, source_file)
+                
+                removed_count = len(current_urls) - len(remaining_urls)
+                print(f"🗑️  Removed {removed_count} failed URLs from {source_file}")
+                
+        except Exception as e:
+            print(f"⚠️  Error removing failed URLs from source file: {e}")
+    
+    async def process_urls_multiprocess(self, urls, download_kwargs, master_file, source_file=None):
+        """Process URLs using multiple worker processes"""
+        print(f"🚀 Starting multiprocess processing with {self.num_workers} workers")
+        print(f"📊 Total URLs: {len(urls)}")
+        print("="*60)
+        
+        # Distribute URLs among workers
+        url_chunks = self.distribute_urls(urls)
+        actual_workers = len(url_chunks)
+        
+        if actual_workers < self.num_workers:
+            print(f"📝 Using {actual_workers} workers (fewer URLs than requested workers)")
+        
+        # Clean up any existing worker progress files
+        self.cleanup_worker_progress_files()
+        
+        # Start worker processes
+        processes = []
+        for i, chunk in enumerate(url_chunks):
+            print(f"🔧 Starting worker {i} with {len(chunk)} URLs")
+            
+            process = mp.Process(
+                target=worker_function,
+                args=(i, chunk, self.ms_token, self.args, download_kwargs, master_file, self.shutdown_event)
+            )
+            process.start()
+            processes.append(process)
+        
+        # Monitor workers
+        try:
+            print(f"👀 Monitoring {len(processes)} worker processes...")
+            
+            # Wait for all processes to complete
+            for i, process in enumerate(processes):
+                process.join()
+                print(f"✅ Worker {i} completed")
+                
+        except KeyboardInterrupt:
+            print("\n🚨 Interrupt received, shutting down workers...")
+            self.shutdown_event.set()
+            
+            # Give workers time to finish current tasks
+            for process in processes:
+                process.join(timeout=30)
+                if process.is_alive():
+                    print(f"⚠️  Force terminating worker {process.pid}")
+                    process.terminate()
+                    process.join(timeout=5)
+                    if process.is_alive():
+                        process.kill()
+        
+        # Aggregate results
+        self.total_successful, self.total_failed, self.all_failed_urls = self.aggregate_worker_progress()
+        
+        # Remove failed URLs from source file
+        if source_file and self.all_failed_urls:
+            self.remove_failed_urls_from_source(source_file, self.all_failed_urls)
+        
+        # Clean up worker progress files
+        self.cleanup_worker_progress_files()
+        
+        print(f"\n🎉 Multiprocess processing completed!")
+        print(f"✅ Successful: {self.total_successful}")
+        print(f"❌ Failed: {self.total_failed}")
+        print(f"📊 Total processed: {self.total_successful + self.total_failed}")
+        
+        if self.all_failed_urls:
+            print(f"🗑️  Removed {len(self.all_failed_urls)} failed URLs from source file")
+
+
 def load_urls_from_file(file_path):
     """Load URLs from text file"""
     if not os.path.exists(file_path):
@@ -1019,6 +1493,9 @@ async def main():
     parser.add_argument("--diagnose", action="store_true", help="Diagnose CUDA environment and exit")
     parser.add_argument("--memory-tracking", action="store_true", help="Enable memory usage tracking")
     
+    # Multiprocessing options
+    parser.add_argument("--workers", type=int, default=1, help="Number of worker processes for parallel processing (default: 1)")
+    
     args = parser.parse_args()
     
     # Handle diagnostic mode
@@ -1028,8 +1505,19 @@ async def main():
     
     # Validate arguments
     if not args.url and not args.from_file:
-        # If no arguments are provided, use default settings
-        if len(sys.argv) == 1:
+        # If no arguments are provided, OR only system flags (like --workers) are provided,
+        # use default settings
+        has_only_system_flags = all(
+            arg in ['--workers', '--diagnose', '--memory-tracking', '--force-cpu', 
+                   '--clean-progress', '--clean-old-downloads', '--whisper', '--mp3',
+                   '--delay', '--batch-size', '--max-comments', '--quality', '--output',
+                   '--proxy', '--limit', '--force-redownload'] or 
+            arg.isdigit() or arg.startswith('-') == False
+            for arg in sys.argv[1:]
+        )
+        
+        if len(sys.argv) == 1 or has_only_system_flags:
+            print("🔧 Using default settings: --from-file urls.txt --mp3 --whisper")
             args.from_file = 'urls.txt'
             args.mp3 = True
             args.batch_size = 10
@@ -1121,45 +1609,83 @@ async def main():
     
     print(f"📊 URLs to process: {len(urls)} out of {original_count} total")
     
-    # Process URLs
+    # Process URLs - Choose between single-process and multiprocess modes
     try:
-        await processor.process_urls(urls, download_kwargs)
-        
-        # Auto-clean the master JSON after successful completion
-        if not processor.shutdown_requested:
+        if args.workers <= 1:
+            # Single-process mode (original behavior)
+            print("🔧 Using single-process mode")
+            await processor.process_urls(urls, download_kwargs)
+            
+            # Auto-clean the master JSON after successful completion
+            if not processor.shutdown_requested:
+                auto_clean_master_json(processor.master_file)
+        else:
+            # Multiprocess mode
+            print(f"🔧 Using multiprocess mode with {args.workers} workers")
+            
+            # Validate that we're processing from a file (needed for multiprocess)
+            if not args.from_file:
+                print("❌ Multiprocessing requires --from-file option")
+                sys.exit(1)
+            
+            # Create multiprocess coordinator
+            coordinator = MultiprocessCoordinator(args, processor.ms_token)
+            
+            # Remove whisper model from download_kwargs for multiprocessing
+            # Each worker will load its own model
+            multiprocess_download_kwargs = download_kwargs.copy()
+            multiprocess_download_kwargs.pop('whisper_model', None)
+            multiprocess_download_kwargs.pop('whisper_device', None)
+            
+            # Process URLs using multiprocessing
+            await coordinator.process_urls_multiprocess(
+                urls, multiprocess_download_kwargs, processor.master_file, processor.source_file
+            )
+            
+            # Auto-clean the master JSON after successful completion
             auto_clean_master_json(processor.master_file)
         
     except KeyboardInterrupt:
         print("\n🚨 Graceful shutdown initiated...")
-        processor.shutdown_requested = True
         
-        # Give time for cleanup
-        print("🧹 Cleaning up API sessions...")
-        await processor.cleanup_api_session()
-        
-        processor.save_progress()
-        print("💾 Progress saved - you can resume later")
-        
+        if args.workers <= 1:
+            # Single-process cleanup
+            processor.shutdown_requested = True
+            
+            # Give time for cleanup
+            print("🧹 Cleaning up API sessions...")
+            await processor.cleanup_api_session()
+            
+            processor.save_progress()
+            print("💾 Progress saved - you can resume later")
+        else:
+            # Multiprocess cleanup handled by coordinator
+            print("🧹 Multiprocess cleanup handled by coordinator")
+            
         print("✅ Shutdown completed gracefully")
         sys.exit(0)
     except Exception as e:
         print(f"❌ Unexpected error: {e}")
-        processor.shutdown_requested = True
-        await processor.cleanup_api_session()
-        processor.save_progress()
+        
+        if args.workers <= 1:
+            processor.shutdown_requested = True
+            await processor.cleanup_api_session()
+            processor.save_progress()
+        
         sys.exit(1)
     finally:
         # Ensure cleanup always happens
-        try:
-            await processor.cleanup_api_session()
-        except:
-            pass
-            
-        # Cleanup
-        if processor.enable_memory_tracking:
-            current, peak = tracemalloc.get_traced_memory()
-            print(f"\n📊 Final memory usage: Current={current/1024/1024:.1f}MB, Peak={peak/1024/1024:.1f}MB")
-            tracemalloc.stop()
+        if args.workers <= 1:
+            try:
+                await processor.cleanup_api_session()
+            except:
+                pass
+                
+            # Cleanup
+            if processor.enable_memory_tracking:
+                current, peak = tracemalloc.get_traced_memory()
+                print(f"\n📊 Final memory usage: Current={current/1024/1024:.1f}MB, Peak={peak/1024/1024:.1f}MB")
+                tracemalloc.stop()
         
         # Force final garbage collection
         gc.collect()
