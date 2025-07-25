@@ -6,14 +6,37 @@ import sys
 import importlib.util
 
 def get_script_info(script_path):
-    """Extracts the docstring from a Python script."""
-    try:
-        with open(script_path, 'r', encoding='utf-8') as f:
-            tree = ast.parse(f.read())
-            docstring = ast.get_docstring(tree)
-            return docstring.strip().split('\n')[0] if docstring else "No description available."
-    except Exception:
-        return "No description available."
+    """Returns description for known scripts."""
+    script_descriptions = {
+        # Analysis scripts
+        "comment_extractor.py": "Extract comments from TikTok videos and update master.json",
+        "count.py": "Count posts and comments from master JSON files",
+        "count_master.py": "Analyze entries in master2.json with error recovery",
+        
+        # Cleanup scripts
+        "sanitize_json.py": "Extract videos with transcriptions > 40 chars",
+        "fix_json.py": "Fix corrupted JSON files by extracting valid objects",
+        "remove_duplicates.py": "Remove duplicate URLs keeping most complete data",
+        "clean_no_transcription.py": "Remove entries without transcriptions",
+        "deduplicate.py": "Remove duplicate URLs from text files",
+        
+        # Collection scripts
+        "browser_harvester.py": "Harvest URLs from existing Firefox browser",
+        "tiktok_url_collector.py": "Collect URLs with stealth browser mode",
+        "url_harvester.py": "Harvest URLs from trending/hashtags/users/searches",
+        "update_comments_v2.py": "Update master2.json with video comments",
+        "master_download_and_comment.py": "Download videos and extract comments",
+        "tiktok_scraper.py": "Multi-process downloader with resume capability",
+        "tiktok_downloader.py": "Simple video downloader using yt-dlp",
+        
+        # Utils scripts
+        "connect_existing_firefox.py": "Connect to Firefox for remote debugging",
+        "memory_efficient_append.py": "Stream append JSON without loading all data",
+        "process_single_video.py": "Extract comments from a single video"
+    }
+    
+    script_name = os.path.basename(script_path)
+    return script_descriptions.get(script_name, "No description available.")
 
 def find_scripts(directory="scripts"):
     """Finds all Python scripts in the given directory and its subdirectories, ignoring __init__.py."""
@@ -26,7 +49,6 @@ def find_scripts(directory="scripts"):
 
 def main():
     """Main function to display and run scripts."""
-    import ast
     scripts = find_scripts()
     if not scripts:
         print("No scripts found.")
