@@ -7,7 +7,30 @@ import json
 import re
 import os
 import sys
+import platform
 from datetime import datetime
+
+# Handle Windows encoding issues
+if platform.system() == 'Windows':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+
+def safe_print(message):
+    """Print message with fallback for encoding issues"""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        # Fallback: replace emojis with text equivalents
+        fallback_message = (message
+                          .replace('💾', '[BACKUP]')
+                          .replace('🔧', '[FIXING]')
+                          .replace('✅', '[SUCCESS]')
+                          .replace('❌', '[ERROR]')
+                          .replace('📊', '[INFO]')
+                          .replace('🔗', '[URL]')
+                          .replace('⚠️', '[WARNING]'))
+        print(fallback_message)
 
 def extract_json_objects(content):
     """Extract individual JSON objects from potentially corrupted content"""
@@ -51,7 +74,7 @@ def extract_json_objects(content):
                         in_object = False
                         current_object = []
                     except:
-                        print(f"⚠️  Failed to parse object starting at line containing: {current_object[0][:50]}...")
+                        safe_print(f"⚠️  Failed to parse object starting at line containing: {current_object[0][:50]}...")
                         in_object = False
                         current_object = []
                         brace_count = 0
@@ -62,7 +85,7 @@ def fix_json_file(input_file, output_file=None):
     """Fix corrupted JSON file"""
     
     if not os.path.exists(input_file):
-        print(f"❌ File not found: {input_file}")
+        safe_print(f"❌ File not found: {input_file}")
         return False
     
     if output_file is None:
@@ -70,9 +93,9 @@ def fix_json_file(input_file, output_file=None):
         backup_file = f"{input_file}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         os.rename(input_file, backup_file)
         output_file = input_file
-        print(f"💾 Created backup: {backup_file}")
+        safe_print(f"💾 Created backup: {backup_file}")
     
-    print(f"🔧 Reading {input_file}...")
+    safe_print(f"🔧 Reading {input_file}...")
     
     try:
         # First try to load as valid JSON
@@ -80,7 +103,7 @@ def fix_json_file(input_file, output_file=None):
             data = json.load(f)
         
         if isinstance(data, list):
-            print(f"✅ File is already valid JSON with {len(data)} entries")
+            safe_print(f"✅ File is already valid JSON with {len(data)} entries")
             
             # Still write it out to ensure proper formatting
             with open(output_file, 'w', encoding='utf-8') as f:
@@ -88,7 +111,7 @@ def fix_json_file(input_file, output_file=None):
             
             return True
     except json.JSONDecodeError:
-        print(f"🔧 JSON is corrupted, attempting to repair...")
+        safe_print(f"🔧 JSON is corrupted, attempting to repair...")
     
     # Read raw content
     with open(input_file if output_file != input_file else backup_file, 'r', encoding='utf-8') as f:
@@ -97,11 +120,11 @@ def fix_json_file(input_file, output_file=None):
     # Extract individual objects
     objects = extract_json_objects(content)
     
-    print(f"📊 Extracted {len(objects)} valid JSON objects")
+    safe_print(f"📊 Extracted {len(objects)} valid JSON objects")
     
     # Count URLs
     urls_found = sum(1 for obj in objects if isinstance(obj, dict) and 'url' in obj)
-    print(f"🔗 Found {urls_found} objects with URLs")
+    safe_print(f"🔗 Found {urls_found} objects with URLs")
     
     # Save fixed JSON
     with open(output_file, 'w', encoding='utf-8') as f:
@@ -111,11 +134,11 @@ def fix_json_file(input_file, output_file=None):
     try:
         with open(output_file, 'r', encoding='utf-8') as f:
             verify_data = json.load(f)
-        print(f"✅ Successfully created valid JSON with {len(verify_data)} entries")
-        print(f"💾 Fixed file saved as: {output_file}")
+        safe_print(f"✅ Successfully created valid JSON with {len(verify_data)} entries")
+        safe_print(f"💾 Fixed file saved as: {output_file}")
         return True
     except:
-        print(f"❌ Failed to create valid JSON")
+        safe_print(f"❌ Failed to create valid JSON")
         return False
 
 def main():

@@ -22,6 +22,8 @@ import subprocess
 import platform
 import signal
 import multiprocessing as mp
+import threading
+from collections import deque
 try:
     import fcntl  # Unix file locking
 except ImportError:
@@ -30,6 +32,16 @@ try:
     import msvcrt  # Windows file locking
 except ImportError:
     msvcrt = None
+try:
+    from rich.console import Console
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.align import Align
+    from rich.layout import Layout
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
 from pathlib import Path
 from datetime import datetime
 from TikTokApi import TikTokApi
@@ -339,6 +351,158 @@ def append_batch_to_master_json_safe(metadata_list, master_file_path):
     with FileLock(master_file_path):
         # Use the existing memory-efficient append function
         append_to_master_json(metadata_list, master_file_path)
+
+
+def show_ascii_banner():
+    """Display ASCII banner for TikTok Scraper V2"""
+    banner = """
+╔════════════════════════════════════════════════════════════════╗
+║  ████████╗██╗██╗  ██╗████████╗ ██████╗ ██╗  ██╗                ║
+║  ╚══██╔══╝██║██║ ██╔╝╚══██╔══╝██╔═══██╗██║ ██╔╝                ║
+║     ██║   ██║█████╔╝    ██║   ██║   ██║█████╔╝                 ║
+║     ██║   ██║██╔═██╗    ██║   ██║   ██║██╔═██╗                 ║
+║     ██║   ██║██║  ██╗   ██║   ╚██████╔╝██║  ██╗                ║
+║     ╚═╝   ╚═╝╚═╝  ╚═╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝                ║
+║                                                                ║
+║   ███████╗ ██████╗██████╗  █████╗ ██████╗ ███████╗██████╗      ║
+║   ██╔════╝██╔════╝██╔══██╗██╔══██╗██╔══██╗██╔════╝██╔══██╗     ║
+║   ███████╗██║     ██████╔╝███████║██████╔╝█████╗  ██████╔╝     ║
+║   ╚════██║██║     ██╔══██╗██╔══██║██╔═══╝ ██╔══╝  ██╔══██╗     ║
+║   ███████║╚██████╗██║  ██║██║  ██║██║     ███████╗██║  ██║     ║
+║   ╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝     ║
+║                                                                ║
+║                            V2.0                               ║
+║                  Multiprocessing Edition                      ║
+╚════════════════════════════════════════════════════════════════╝
+    """
+    
+    if RICH_AVAILABLE:
+        console = Console()
+        console.print(banner, style="bold cyan")
+        console.print("🚀 Advanced TikTok Video Downloader & Comment Extractor", justify="center", style="bold green")
+        console.print("", justify="center")
+    else:
+        print(banner)
+        print("🚀 Advanced TikTok Video Downloader & Comment Extractor")
+        print()
+
+
+class LiveDisplay:
+    """Live-updating display for multiprocessing progress"""
+    
+    def __init__(self, num_workers, total_videos):
+        self.num_workers = num_workers
+        self.total_videos = total_videos
+        self.start_time = time.time()
+        self.console = Console() if RICH_AVAILABLE else None
+        self.animation_chars = [".", "..", "..."]
+        self.animation_index = 0
+        self.last_animation_update = 0
+        
+    def create_display_content(self, shared_state):
+        """Create the display content for live updating"""
+        current_time = time.time()
+        
+        # Update animation every 500ms
+        if current_time - self.last_animation_update > 0.5:
+            self.animation_index = (self.animation_index + 1) % len(self.animation_chars)
+            self.last_animation_update = current_time
+        
+        # Calculate processing rate
+        elapsed_time = max(current_time - self.start_time, 1)  # Avoid division by zero
+        total_completed = shared_state.get('total_completed', 0)
+        videos_per_minute = (total_completed * 60) / elapsed_time
+        
+        # Build display content
+        content = []
+        
+        # Error section
+        errors = shared_state.get('errors', [])
+        if errors:
+            content.append("ERRORS:")
+            for error in errors[-5:]:  # Show last 5 errors
+                content.append(f"❌ {error}")
+            content.append("")
+        
+        # Main progress line
+        animation = self.animation_chars[self.animation_index]
+        rate_text = f"{videos_per_minute:.1f} videos/min"
+        progress_line = f"{total_completed}/{self.total_videos} Processing{animation}"
+        # Pad to align rate on the right (assuming 80 char width)
+        padding = max(0, 80 - len(progress_line) - len(rate_text))
+        content.append(f"{progress_line}{' ' * padding}{rate_text}")
+        
+        # Worker separator
+        content.append("--WORKERS------------------")
+        
+        # Worker status
+        workers_data = shared_state.get('workers', {})
+        for worker_id in range(self.num_workers):
+            worker_data = workers_data.get(worker_id, {})
+            completed = worker_data.get('completed', 0)
+            total = worker_data.get('total', 0)
+            status = worker_data.get('status', 'waiting')
+            current_video = worker_data.get('current_video', 'Waiting...')
+            
+            # Worker progress line
+            content.append(f"Worker {worker_id}: {completed}/{total}")
+            
+            # Status line with connector
+            status_icon = self.get_status_icon(status)
+            truncated_title = self.truncate_title(current_video, 60)
+            content.append(f"⎿ {status_icon} {status.title()}: \"{truncated_title}\"")
+            
+            # Add spacing between workers (except last)
+            if worker_id < self.num_workers - 1:
+                content.append("")
+        
+        return "\n".join(content)
+    
+    def get_status_icon(self, status):
+        """Get status icon for worker status"""
+        status_icons = {
+            'downloading': '🎬',
+            'transcribing': '🎤',
+            'comments': '💬',
+            'complete': '✅',
+            'failed': '❌',
+            'waiting': '⏸️'
+        }
+        return status_icons.get(status.lower(), '🔄')
+    
+    def truncate_title(self, title, max_length):
+        """Truncate title to max length with ellipsis"""
+        if len(title) <= max_length:
+            return title
+        return title[:max_length-3] + "..."
+    
+    def fallback_display(self, shared_state):
+        """Fallback display for when rich is not available"""
+        content = self.create_display_content(shared_state)
+        # Clear screen and show content
+        os.system('cls' if os.name == 'nt' else 'clear')
+        print(content)
+    
+    def show_final_summary(self, shared_state):
+        """Show final completion summary"""
+        total_completed = shared_state.get('total_completed', 0)
+        total_failed = shared_state.get('total_failed', 0)
+        elapsed_time = time.time() - self.start_time
+        
+        summary = f"""
+╔════════════════════════════════════════════════════════════════╗
+║                        PROCESSING COMPLETE                     ║
+╠════════════════════════════════════════════════════════════════╣
+║  ✅ Successful: {total_completed:<10} ❌ Failed: {total_failed:<13}        ║
+║  📊 Total: {total_completed + total_failed:<10} ⏱️  Time: {elapsed_time/60:.1f} minutes          ║
+║  📈 Rate: {(total_completed * 60 / elapsed_time):.1f} videos/min                           ║
+╚════════════════════════════════════════════════════════════════╝
+        """
+        
+        if RICH_AVAILABLE:
+            self.console.print(summary, style="bold green")
+        else:
+            print(summary)
 
 
 class RobustTikTokProcessor:
@@ -1054,27 +1218,80 @@ class RobustTikTokProcessor:
 class WorkerProcessor:
     """Simplified processor for individual worker processes"""
     
-    def __init__(self, worker_id, ms_token, args):
+    def __init__(self, worker_id, ms_token, args, shared_state):
         self.worker_id = worker_id
         self.ms_token = ms_token
         self.args = args
+        self.shared_state = shared_state
         self.successful_count = 0
         self.failed_count = 0
         self.skipped_count = 0
         self.progress_file = f"download_progress_worker_{worker_id}.json"
         self.shutdown_event = None  # Will be set by coordinator
         
+        # Initialize worker state in shared data
+        self.update_worker_status('loading', 'Loading Whisper model...')
+        
         # Load whisper model if needed
         self.whisper_model = None
         self.whisper_device = "CPU"
         if args.whisper:
             from scripts.collection.tiktok_scraper import load_whisper_model
-            print(f"🎤 Worker {worker_id}: Loading whisper model...")
             self.whisper_model, self.whisper_device = load_whisper_model(force_cpu=args.force_cpu)
             if self.whisper_model:
-                print(f"✅ Worker {worker_id}: Whisper model loaded on {self.whisper_device}")
+                self.update_worker_status('ready', f'Whisper model loaded on {self.whisper_device}')
             else:
-                print(f"❌ Worker {worker_id}: Failed to load whisper model")
+                self.update_worker_status('error', 'Failed to load whisper model')
+        else:
+            self.update_worker_status('ready', 'Ready to process videos')
+    
+    def update_worker_status(self, status, current_video):
+        """Update worker status in shared state"""
+        try:
+            if 'workers' not in self.shared_state:
+                self.shared_state['workers'] = {}
+            
+            self.shared_state['workers'][self.worker_id] = {
+                'completed': self.successful_count,
+                'total': getattr(self, 'total_urls', 0),
+                'status': status,
+                'current_video': current_video
+            }
+        except Exception:
+            pass  # Ignore errors in shared state updates
+    
+    def add_error(self, error_message):
+        """Add error to shared error list"""
+        try:
+            if 'errors' not in self.shared_state:
+                self.shared_state['errors'] = []
+            
+            full_error = f"Worker {self.worker_id}: {error_message}"
+            self.shared_state['errors'].append(full_error)
+            
+            # Keep only last 10 errors to prevent memory issues
+            if len(self.shared_state['errors']) > 10:
+                self.shared_state['errors'] = self.shared_state['errors'][-10:]
+        except Exception:
+            pass  # Ignore errors in shared state updates
+    
+    def update_totals(self):
+        """Update total completion counts in shared state"""
+        try:
+            # Calculate total completed across all workers
+            total_completed = 0
+            total_failed = 0
+            
+            workers_data = self.shared_state.get('workers', {})
+            for worker_data in workers_data.values():
+                # This will be updated when we modify the process_urls method
+                pass
+            
+            # For now, just update from this worker
+            self.shared_state['total_completed'] = self.shared_state.get('total_completed', 0)
+            self.shared_state['total_failed'] = self.shared_state.get('total_failed', 0)
+        except Exception:
+            pass
     
     def save_progress(self, processed_urls, failed_urls, current_url=None):
         """Save worker progress"""
@@ -1159,7 +1376,8 @@ class WorkerProcessor:
     
     async def process_urls(self, urls, download_kwargs, master_file):
         """Process assigned URLs for this worker"""
-        print(f"🚀 Worker {self.worker_id}: Starting with {len(urls)} URLs")
+        self.total_urls = len(urls)
+        self.update_worker_status('starting', f'Starting with {len(urls)} URLs')
         
         processed_urls = set()
         failed_urls = set()
@@ -1168,11 +1386,15 @@ class WorkerProcessor:
         for i, url in enumerate(urls, 1):
             # Check for shutdown
             if self.shutdown_event and self.shutdown_event.is_set():
-                print(f"🚨 Worker {self.worker_id}: Shutdown requested")
+                self.update_worker_status('shutdown', 'Shutdown requested')
                 break
             
             try:
-                print(f"🎬 Worker {self.worker_id}: Processing {i}/{len(urls)}: {url}")
+                # Extract video title for display
+                video_title = self.extract_title_from_url(url)
+                
+                # Update status: downloading
+                self.update_worker_status('downloading', video_title)
                 
                 # Download video
                 from scripts.collection.tiktok_scraper import download_single_video as download_tiktok_video
@@ -1185,16 +1407,26 @@ class WorkerProcessor:
                 result = download_tiktok_video(url, **worker_download_kwargs)
                 
                 if not result['success']:
-                    print(f"❌ Worker {self.worker_id}: Video download failed: {result.get('error', 'Unknown error')}")
+                    error_msg = result.get('error', 'Unknown error')
+                    self.add_error(f"Video download failed: {error_msg}")
+                    self.update_worker_status('failed', video_title)
                     failed_urls.add(url)
                     self.failed_count += 1
+                    
+                    # Update totals in shared state
+                    self.shared_state['total_failed'] = self.shared_state.get('total_failed', 0) + 1
                     continue
                 
                 metadata = result['metadata']
                 processed_urls.add(url)
                 
+                # Update status: transcribing (if whisper enabled)
+                if self.args.whisper:
+                    self.update_worker_status('transcribing', video_title)
+                
                 # Extract comments if MS_TOKEN available
                 if self.ms_token:
+                    self.update_worker_status('comments', video_title)
                     comments = await self.extract_video_comments_safe(url, self.args.max_comments)
                     if comments:
                         metadata['top_comments'] = comments
@@ -1216,6 +1448,12 @@ class WorkerProcessor:
                 batch_metadata.append(metadata)
                 self.successful_count += 1
                 
+                # Update status: complete
+                self.update_worker_status('complete', video_title)
+                
+                # Update totals in shared state
+                self.shared_state['total_completed'] = self.shared_state.get('total_completed', 0) + 1
+                
                 # Save immediately to master file
                 if batch_metadata:
                     append_batch_to_master_json_safe(batch_metadata, master_file)
@@ -1227,6 +1465,7 @@ class WorkerProcessor:
                 
                 # Add delay between requests
                 if i < len(urls):
+                    self.update_worker_status('waiting', f'Waiting {self.args.delay}s...')
                     time.sleep(self.args.delay)
                 
                 # Cleanup every 3 videos
@@ -1234,22 +1473,38 @@ class WorkerProcessor:
                     gc.collect()
                     
             except Exception as e:
-                print(f"❌ Worker {self.worker_id}: Error processing {url}: {e}")
+                error_msg = f"Error processing {url}: {e}"
+                self.add_error(error_msg)
+                self.update_worker_status('failed', video_title if 'video_title' in locals() else 'Unknown video')
                 failed_urls.add(url)
                 self.failed_count += 1
+                self.shared_state['total_failed'] = self.shared_state.get('total_failed', 0) + 1
         
         # Final progress save
         self.save_progress(processed_urls, failed_urls)
+        self.update_worker_status('finished', f'Completed - Success: {self.successful_count}, Failed: {self.failed_count}')
         
-        print(f"✅ Worker {self.worker_id}: Completed - Success: {self.successful_count}, Failed: {self.failed_count}")
         return self.successful_count, self.failed_count, list(failed_urls)
+    
+    def extract_title_from_url(self, url):
+        """Extract a simple title from TikTok URL for display"""
+        try:
+            # Extract username and video ID for display
+            import re
+            match = re.search(r'@([^/]+)/video/(\d+)', url)
+            if match:
+                username, video_id = match.groups()
+                return f"@{username} - {video_id[:10]}..."
+        except:
+            pass
+        return url[:50] + "..." if len(url) > 50 else url
 
 
-def worker_function(worker_id, urls, ms_token, args, download_kwargs, master_file, shutdown_event):
+def worker_function(worker_id, urls, ms_token, args, download_kwargs, master_file, shutdown_event, shared_state):
     """Worker function to run in separate process"""
     try:
         # Create worker processor
-        worker = WorkerProcessor(worker_id, ms_token, args)
+        worker = WorkerProcessor(worker_id, ms_token, args, shared_state)
         worker.shutdown_event = shutdown_event
         
         # Run the async processing
@@ -1257,7 +1512,13 @@ def worker_function(worker_id, urls, ms_token, args, download_kwargs, master_fil
         return result
         
     except Exception as e:
-        print(f"❌ Worker {worker_id}: Fatal error: {e}")
+        # Add error to shared state
+        try:
+            if 'errors' not in shared_state:
+                shared_state['errors'] = []
+            shared_state['errors'].append(f"Worker {worker_id}: Fatal error: {e}")
+        except:
+            pass
         return 0, len(urls), urls  # All URLs failed
 
 
@@ -1274,18 +1535,66 @@ class MultiprocessCoordinator:
         self.total_failed = 0
         self.all_failed_urls = set()
         
+        # Initialize shared state
+        self.manager = mp.Manager()
+        self.shared_state = self.manager.dict()
+        self.shared_state['workers'] = self.manager.dict()
+        self.shared_state['errors'] = self.manager.list()
+        self.shared_state['total_completed'] = 0
+        self.shared_state['total_failed'] = 0
+        
+        # Live display
+        self.live_display = None
+        self.display_thread = None
+        self.display_running = False
+        
         # Setup signal handlers for graceful shutdown
         self.setup_signal_handlers()
     
     def setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown"""
         def signal_handler(signum, frame):
-            print(f"\n🚨 Graceful shutdown requested (signal {signum})")
             self.shutdown_event.set()
+            self.display_running = False
+            if self.live_display:
+                self.live_display.show_final_summary(dict(self.shared_state))
         
         signal.signal(signal.SIGINT, signal_handler)
         if hasattr(signal, 'SIGTERM'):
             signal.signal(signal.SIGTERM, signal_handler)
+    
+    def start_live_display(self, total_videos):
+        """Start the live display thread"""
+        self.live_display = LiveDisplay(self.num_workers, total_videos)
+        self.display_running = True
+        
+        def display_loop():
+            while self.display_running:
+                try:
+                    if RICH_AVAILABLE:
+                        # Use rich live display
+                        with Live(self.live_display.create_display_content(dict(self.shared_state)), 
+                                 refresh_per_second=2, console=self.live_display.console) as live:
+                            while self.display_running:
+                                live.update(self.live_display.create_display_content(dict(self.shared_state)))
+                                time.sleep(0.5)
+                    else:
+                        # Use fallback display
+                        while self.display_running:
+                            self.live_display.fallback_display(dict(self.shared_state))
+                            time.sleep(1)
+                except Exception as e:
+                    # If display fails, continue without it
+                    time.sleep(1)
+        
+        self.display_thread = threading.Thread(target=display_loop, daemon=True)
+        self.display_thread.start()
+    
+    def stop_live_display(self):
+        """Stop the live display"""
+        self.display_running = False
+        if self.display_thread:
+            self.display_thread.join(timeout=2)
     
     def distribute_urls(self, urls):
         """Distribute URLs among workers"""
@@ -1373,72 +1682,71 @@ class MultiprocessCoordinator:
     
     async def process_urls_multiprocess(self, urls, download_kwargs, master_file, source_file=None):
         """Process URLs using multiple worker processes"""
-        print(f"🚀 Starting multiprocess processing with {self.num_workers} workers")
-        print(f"📊 Total URLs: {len(urls)}")
-        print("="*60)
         
         # Distribute URLs among workers
         url_chunks = self.distribute_urls(urls)
         actual_workers = len(url_chunks)
         
-        if actual_workers < self.num_workers:
-            print(f"📝 Using {actual_workers} workers (fewer URLs than requested workers)")
+        # Initialize worker states in shared data
+        for i in range(actual_workers):
+            self.shared_state['workers'][i] = {
+                'completed': 0,
+                'total': len(url_chunks[i]),
+                'status': 'initializing',
+                'current_video': 'Starting up...'
+            }
         
-        # Clean up any existing worker progress files
-        self.cleanup_worker_progress_files()
+        # Start live display
+        self.start_live_display(len(urls))
         
-        # Start worker processes
-        processes = []
-        for i, chunk in enumerate(url_chunks):
-            print(f"🔧 Starting worker {i} with {len(chunk)} URLs")
-            
-            process = mp.Process(
-                target=worker_function,
-                args=(i, chunk, self.ms_token, self.args, download_kwargs, master_file, self.shutdown_event)
-            )
-            process.start()
-            processes.append(process)
-        
-        # Monitor workers
         try:
-            print(f"👀 Monitoring {len(processes)} worker processes...")
+            # Clean up any existing worker progress files
+            self.cleanup_worker_progress_files()
             
-            # Wait for all processes to complete
-            for i, process in enumerate(processes):
-                process.join()
-                print(f"✅ Worker {i} completed")
+            # Start worker processes
+            processes = []
+            for i, chunk in enumerate(url_chunks):
+                process = mp.Process(
+                    target=worker_function,
+                    args=(i, chunk, self.ms_token, self.args, download_kwargs, master_file, 
+                          self.shutdown_event, self.shared_state)
+                )
+                process.start()
+                processes.append(process)
+            
+            # Monitor workers
+            try:
+                # Wait for all processes to complete
+                for i, process in enumerate(processes):
+                    process.join()
+                    
+            except KeyboardInterrupt:
+                self.shutdown_event.set()
                 
-        except KeyboardInterrupt:
-            print("\n🚨 Interrupt received, shutting down workers...")
-            self.shutdown_event.set()
-            
-            # Give workers time to finish current tasks
-            for process in processes:
-                process.join(timeout=30)
-                if process.is_alive():
-                    print(f"⚠️  Force terminating worker {process.pid}")
-                    process.terminate()
-                    process.join(timeout=5)
+                # Give workers time to finish current tasks
+                for process in processes:
+                    process.join(timeout=30)
                     if process.is_alive():
-                        process.kill()
-        
-        # Aggregate results
-        self.total_successful, self.total_failed, self.all_failed_urls = self.aggregate_worker_progress()
-        
-        # Remove failed URLs from source file
-        if source_file and self.all_failed_urls:
-            self.remove_failed_urls_from_source(source_file, self.all_failed_urls)
-        
-        # Clean up worker progress files
-        self.cleanup_worker_progress_files()
-        
-        print(f"\n🎉 Multiprocess processing completed!")
-        print(f"✅ Successful: {self.total_successful}")
-        print(f"❌ Failed: {self.total_failed}")
-        print(f"📊 Total processed: {self.total_successful + self.total_failed}")
-        
-        if self.all_failed_urls:
-            print(f"🗑️  Removed {len(self.all_failed_urls)} failed URLs from source file")
+                        process.terminate()
+                        process.join(timeout=5)
+                        if process.is_alive():
+                            process.kill()
+            
+            # Aggregate results
+            self.total_successful, self.total_failed, self.all_failed_urls = self.aggregate_worker_progress()
+            
+            # Remove failed URLs from source file
+            if source_file and self.all_failed_urls:
+                self.remove_failed_urls_from_source(source_file, self.all_failed_urls)
+            
+            # Clean up worker progress files
+            self.cleanup_worker_progress_files()
+            
+        finally:
+            # Stop live display and show final summary
+            self.stop_live_display()
+            if self.live_display:
+                self.live_display.show_final_summary(dict(self.shared_state))
 
 
 def load_urls_from_file(file_path):
@@ -1459,6 +1767,10 @@ def load_urls_from_file(file_path):
 
 
 async def main():
+    # Show ASCII banner
+    show_ascii_banner()
+    time.sleep(1)  # Brief pause to admire the banner
+    
     parser = argparse.ArgumentParser(description="Robust TikTok video downloader and comment extractor")
     
     # Input options
