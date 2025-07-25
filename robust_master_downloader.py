@@ -1,4 +1,4 @@
-#!/Users/ethan/tiktok_scraper/venv/bin/python
+#!/usr/bin/env python3
 """
 Robust TikTok Downloader and Comment Extractor
 Production-ready with contingencies for:
@@ -18,6 +18,9 @@ import re
 import gc
 import tracemalloc
 import shutil
+import subprocess
+import platform
+import signal
 from pathlib import Path
 from datetime import datetime
 from TikTokApi import TikTokApi
@@ -203,7 +206,7 @@ def auto_clean_master_json(master_file_path):
                 print(f"🔧 Attempting to fix corrupted {master_file_path}...")
                 try:
                     import subprocess
-                    result = subprocess.run(['python', './fix_json.py', master_file_path], 
+                    result = subprocess.run(['python', './scripts/cleanup/fix_json.py', master_file_path], 
                                           capture_output=True, text=True, timeout=60)
                     if result.returncode == 0:
                         print("✅ Master JSON file fixed successfully, retrying cleanup...")
@@ -264,7 +267,10 @@ class RobustTikTokProcessor:
         self.successful_count = 0
         self.failed_count = 0
         self.skipped_count = 0
+        self.failed_urls = set()  # Track failed URLs to remove from source file
+        self.source_file = None  # Track the source file path
         self.enable_memory_tracking = args.memory_tracking if hasattr(args, 'memory_tracking') else False
+        self.shutdown_requested = False  # Track graceful shutdown
         
         if self.enable_memory_tracking:
             tracemalloc.start()
@@ -272,13 +278,16 @@ class RobustTikTokProcessor:
         # Configure garbage collection for aggressive cleanup
         gc.set_threshold(700, 10, 10)  # More aggressive GC
         
+        # Setup signal handlers for graceful shutdown
+        self.setup_signal_handlers()
+        
     def fix_master_json(self):
         """Automatically fix corrupted master2.json file"""
         print(f"🔧 Attempting to fix corrupted {self.master_file}...")
         try:
             # Import and run the fix_json functionality
             import subprocess
-            result = subprocess.run(['python', './fix_json.py', self.master_file], 
+            result = subprocess.run(['python', './scripts/cleanup/fix_json.py', self.master_file], 
                                   capture_output=True, text=True, timeout=60)
             if result.returncode == 0:
                 print("✅ Master JSON file fixed successfully")
@@ -420,28 +429,34 @@ class RobustTikTokProcessor:
         print("🔐 Validating MS_TOKEN...")
         
         try:
-            async with TikTokApi() as api:
-                await api.create_sessions(
-                    ms_tokens=[self.ms_token], 
-                    num_sessions=1, 
-                    sleep_after=1,
-                    suppress_resource_load_types=["image", "media", "font", "stylesheet"]
-                )
+            api = TikTokApi()
+            await api.create_sessions(
+                ms_tokens=[self.ms_token], 
+                num_sessions=1, 
+                sleep_after=1,
+                suppress_resource_load_types=["image", "media", "font", "stylesheet"]
+            )
+            
+            # Test with a simple operation
+            test_url = "https://www.tiktok.com/@tiktok/video/7000000000000000000"  # Non-existent video
+            video_id = extract_video_id_from_url(test_url)
+            
+            try:
+                video = api.video(id=video_id)
+                # Try to get video info (will fail for non-existent video but validates token)
+                await video.info()
+            except Exception:
+                # Expected to fail for non-existent video, but if we get here, token works
+                pass
                 
-                # Test with a simple operation
-                test_url = "https://www.tiktok.com/@tiktok/video/7000000000000000000"  # Non-existent video
-                video_id = extract_video_id_from_url(test_url)
+            # Clean up the session
+            try:
+                await api.close_sessions()
+            except Exception:
+                pass
                 
-                try:
-                    video = api.video(id=video_id)
-                    # Try to get video info (will fail for non-existent video but validates token)
-                    await video.info()
-                except Exception:
-                    # Expected to fail for non-existent video, but if we get here, token works
-                    pass
-                    
-                print("✅ MS_TOKEN validated successfully")
-                return True
+            print("✅ MS_TOKEN validated successfully")
+            return True
                 
         except Exception as e:
             print(f"❌ MS_TOKEN validation failed: {e}")
@@ -535,7 +550,7 @@ class RobustTikTokProcessor:
     
     async def extract_video_comments_safe(self, url, max_comments=10):
         """Safely extract comments with error handling - MEMORY OPTIMIZED"""
-        if not self.ms_token:
+        if not self.ms_token or self.shutdown_requested:
             return []
             
         try:
@@ -544,20 +559,31 @@ class RobustTikTokProcessor:
                 print(f"❌ Could not extract video ID from URL: {url}")
                 return []
             
-            # Reuse existing API session if available, otherwise create new one
-            if not hasattr(self, '_api_session') or not self._api_session:
-                print("🔄 Creating new TikTokApi session...")
-                self._api_session = TikTokApi()
-                await self._api_session.create_sessions(
+            # Always create a fresh session for each comment extraction to avoid browser closure issues
+            await self.cleanup_api_session()
+            print("🔄 Creating new TikTokApi session...")
+            self._api_session = TikTokApi()
+            
+            # Create session with timeout
+            await asyncio.wait_for(
+                self._api_session.create_sessions(
                     ms_tokens=[self.ms_token], 
                     num_sessions=1, 
                     sleep_after=1,
                     suppress_resource_load_types=["image", "media", "font", "stylesheet"]
-                )
-                print("✅ TikTokApi session created")
+                ),
+                timeout=30
+            )
+            print("✅ TikTokApi session created")
             
             comments = []
-            async for comment in self._api_session.video(id=video_id).comments(count=max_comments):
+            comment_iter = self._api_session.video(id=video_id).comments(count=max_comments)
+            
+            async for comment in comment_iter:
+                # Check for shutdown during comment extraction
+                if self.shutdown_requested:
+                    break
+                    
                 comment_data = {
                     "comment_id": comment.id,
                     "username": comment.as_dict.get("user", {}).get("unique_id", "unknown"),
@@ -569,8 +595,8 @@ class RobustTikTokProcessor:
                 
                 # Get replies if they exist (limit to save memory)
                 reply_count = comment.as_dict.get("reply_comment_count", 0)
-                if reply_count > 0:
-                    replies = await extract_comment_replies(comment, max_replies=2)  # Reduced from 3 to 2
+                if reply_count > 0 and not self.shutdown_requested:
+                    replies = await extract_comment_replies(comment, max_replies=2)
                     if replies:
                         comment_data["replies"] = replies
                         comment_data["reply_count"] = len(replies)
@@ -583,20 +609,28 @@ class RobustTikTokProcessor:
                 if len(comments) >= max_comments:
                     break
             
+            # Clean up session after comment extraction
+            await self.cleanup_api_session()
+            
             # Force garbage collection after comment extraction
             gc.collect()
             
             return comments
             
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            print(f"⏰ Comment extraction timed out or cancelled")
+            await self.cleanup_api_session()
+            return []
         except Exception as e:
             error_msg = str(e).lower()
+            
+            # Clean up session on any error
+            await self.cleanup_api_session()
             
             # Check for token expiry indicators
             if any(indicator in error_msg for indicator in ['token', 'auth', 'forbidden', 'unauthorized']):
                 print(f"🔄 Possible token expiry detected: {e}")
-                # Close current session on token expiry
-                await self.cleanup_api_session()
-                if await self.handle_token_expiry():
+                if not self.shutdown_requested and await self.handle_token_expiry():
                     # Retry with new token
                     return await self.extract_video_comments_safe(url, max_comments)
             else:
@@ -709,17 +743,70 @@ class RobustTikTokProcessor:
             delattr(self, '_cached_file_urls')
             delattr(self, '_cache_timestamp')
     
+    def setup_signal_handlers(self):
+        """Setup signal handlers for graceful shutdown"""
+        def signal_handler(signum, frame):
+            print("\n\n🚨 Graceful shutdown requested...")
+            self.shutdown_requested = True
+        
+        # Handle Ctrl+C gracefully
+        signal.signal(signal.SIGINT, signal_handler)
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, signal_handler)
+    
+    def remove_failed_url_immediately(self, failed_url):
+        """Remove a single failed URL from the source file immediately"""
+        if not self.source_file or not os.path.exists(self.source_file):
+            return
+            
+        try:
+            # Read current URLs
+            with open(self.source_file, 'r', encoding='utf-8') as f:
+                current_urls = [line.strip() for line in f if line.strip()]
+            
+            # Check if URL exists in file
+            if failed_url not in current_urls:
+                return
+            
+            # Remove the failed URL
+            remaining_urls = [url for url in current_urls if url != failed_url]
+            
+            # Write back immediately (atomic operation)
+            temp_file = f"{self.source_file}.tmp"
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                for url in remaining_urls:
+                    f.write(url + '\n')
+            
+            # Atomic replace
+            if platform.system() == "Windows":
+                if os.path.exists(self.source_file):
+                    os.replace(temp_file, self.source_file)
+            else:
+                os.rename(temp_file, self.source_file)
+            
+            print(f"🗑️  Removed failed URL from {self.source_file}")
+            
+        except Exception as e:
+            print(f"⚠️  Error removing failed URL from source file: {e}")
+            # Clean up temp file if it exists
+            temp_file = f"{self.source_file}.tmp"
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
+    
     async def cleanup_api_session(self):
         """Cleanup TikTokApi session - MEMORY OPTIMIZED"""
         if hasattr(self, '_api_session') and self._api_session:
             try:
-                await self._api_session.close_sessions()
+                # Force close with timeout to prevent hanging
+                await asyncio.wait_for(self._api_session.close_sessions(), timeout=10)
                 if hasattr(self._api_session, 'playwright') and self._api_session.playwright:
-                    await self._api_session.playwright.stop()
+                    await asyncio.wait_for(self._api_session.playwright.stop(), timeout=10)
                 del self._api_session
-                print("🧹 Cleaned up TikTokApi session")
-            except Exception as e:
-                print(f"⚠️  Error cleaning up API session: {e}")
+            except (Exception, asyncio.TimeoutError):
+                pass  # Ignore cleanup errors and timeouts
             finally:
                 self._api_session = None
     
@@ -734,10 +821,23 @@ class RobustTikTokProcessor:
         """Kill orphaned browser processes - MEMORY OPTIMIZED"""
         try:
             import subprocess
-            result = subprocess.run(['pkill', '-f', 'chromium'], capture_output=True)
-            result2 = subprocess.run(['pkill', '-f', 'chrome'], capture_output=True)
-            result3 = subprocess.run(['pkill', '-f', 'playwright'], capture_output=True)
-            print(f"🧹 Killed orphaned browser processes")
+            import platform
+            
+            if platform.system() == "Windows":
+                # Windows process cleanup
+                try:
+                    subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe'], capture_output=True, check=False)
+                    subprocess.run(['taskkill', '/F', '/IM', 'msedge.exe'], capture_output=True, check=False)
+                    subprocess.run(['taskkill', '/F', '/IM', 'chromium.exe'], capture_output=True, check=False)
+                    print(f"🧹 Killed orphaned browser processes (Windows)")
+                except Exception:
+                    pass  # Ignore errors on Windows
+            else:
+                # Unix/Linux/macOS process cleanup
+                subprocess.run(['pkill', '-f', 'chromium'], capture_output=True, check=False)
+                subprocess.run(['pkill', '-f', 'chrome'], capture_output=True, check=False)
+                subprocess.run(['pkill', '-f', 'playwright'], capture_output=True, check=False)
+                print(f"🧹 Killed orphaned browser processes (Unix)")
         except Exception as e:
             print(f"⚠️  Error killing browser processes: {e}")
     
@@ -757,6 +857,11 @@ class RobustTikTokProcessor:
         failed_urls = []
         
         for i, url in enumerate(urls, 1):
+            # Check for graceful shutdown request
+            if self.shutdown_requested:
+                print(f"\n🚨 Shutdown requested, saving progress and exiting gracefully...")
+                break
+                
             print(f"\n{'='*60}")
             print(f"Processing {i}/{len(urls)}: {url}")
             print(f"{'='*60}")
@@ -765,10 +870,23 @@ class RobustTikTokProcessor:
             if i % 5 == 0:
                 self.save_progress(failed_urls, url)
             
-            # Process single URL
-            metadata = await self.download_and_extract_comments(
-                url, download_kwargs, self.args.max_comments
-            )
+            # Process single URL with timeout and cancellation support
+            try:
+                metadata = await asyncio.wait_for(
+                    self.download_and_extract_comments(
+                        url, download_kwargs, self.args.max_comments
+                    ),
+                    timeout=300  # 5 minute timeout per video
+                )
+            except asyncio.TimeoutError:
+                print(f"⏰ Video processing timed out: {url}")
+                metadata = None
+                # Add to failed URLs and remove immediately
+                self.failed_urls.add(url)
+                self.remove_failed_url_immediately(url)
+            except asyncio.CancelledError:
+                print(f"\n🚨 Operation cancelled, cleaning up...")
+                break
             
             if metadata:
                 batch_metadata.append(metadata)
@@ -776,6 +894,7 @@ class RobustTikTokProcessor:
                 print(f"✅ {i}/{len(urls)} completed successfully")
             else:
                 failed_urls.append(url)
+                self.failed_urls.add(url)  # Track for removal from source file
                 self.failed_count += 1
                 print(f"❌ {i}/{len(urls)} failed")
             
@@ -831,6 +950,10 @@ class RobustTikTokProcessor:
         # Final progress save
         self.save_progress(failed_urls)
         
+        # Remove failed URLs from source file
+        if self.failed_urls and self.source_file:
+            self.remove_failed_urls_from_source()
+        
         # Cleanup API session on completion - MEMORY OPTIMIZED
         await self.cleanup_api_session()
         
@@ -839,6 +962,9 @@ class RobustTikTokProcessor:
         print(f"❌ Failed: {self.failed_count}")
         print(f"⏭️  Skipped (duplicates): {self.skipped_count}")
         print(f"📊 Total processed: {self.successful_count + self.failed_count + self.skipped_count}")
+        
+        if self.failed_urls:
+            print(f"🗑️  Removed {len(self.failed_urls)} failed URLs from {self.source_file}")
 
 
 def load_urls_from_file(file_path):
@@ -971,11 +1097,13 @@ async def main():
     # Get URLs to process
     if args.from_file:
         urls = load_urls_from_file(args.from_file)
+        processor.source_file = args.from_file  # Track source file for failed URL removal
         if args.limit:
             urls = urls[:args.limit]
             print(f"🔢 Limited to first {args.limit} URLs")
     else:
         urls = [args.url]
+        processor.source_file = None  # No source file for single URLs
     
     if not urls:
         print("❌ No URLs to process")
@@ -998,18 +1126,35 @@ async def main():
         await processor.process_urls(urls, download_kwargs)
         
         # Auto-clean the master JSON after successful completion
-        auto_clean_master_json(processor.master_file)
+        if not processor.shutdown_requested:
+            auto_clean_master_json(processor.master_file)
         
     except KeyboardInterrupt:
-        print("\n❌ Operation cancelled by user")
+        print("\n🚨 Graceful shutdown initiated...")
+        processor.shutdown_requested = True
+        
+        # Give time for cleanup
+        print("🧹 Cleaning up API sessions...")
+        await processor.cleanup_api_session()
+        
         processor.save_progress()
         print("💾 Progress saved - you can resume later")
-        sys.exit(1)
+        
+        print("✅ Shutdown completed gracefully")
+        sys.exit(0)
     except Exception as e:
         print(f"❌ Unexpected error: {e}")
+        processor.shutdown_requested = True
+        await processor.cleanup_api_session()
         processor.save_progress()
         sys.exit(1)
     finally:
+        # Ensure cleanup always happens
+        try:
+            await processor.cleanup_api_session()
+        except:
+            pass
+            
         # Cleanup
         if processor.enable_memory_tracking:
             current, peak = tracemalloc.get_traced_memory()
