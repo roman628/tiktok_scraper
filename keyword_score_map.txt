@@ -8,8 +8,8 @@ Total meaningful keywords found: 13533
 Filtered out names and noise words using 629 stopwords
 ==========================================================================================
 
+FORMAT: KEYWORD | SCORE | FREQ | AVG_ENGAGEMENT | AVG_VIEWS | AVG_LIKES | VIDEOS | TIMING | EARLY%
 ----------------------------------------------------------------------------------------------------
-FORMAT: KEYWORD            | SCORE    | FREQ | AVG_ENGAGE | AVG_VIEWS | AVG_LIKES| VIDS| TIMING | EARLY%
 
    1. darkest              |   5.6256 |    7 |   0.214644 |    344561 |    22824 |   7 |  0.686 | 28.6%
    2. deepest              |   5.4278 |    9 |   0.178689 |     61944 |     4544 |   9 |  0.556 | 22.2%

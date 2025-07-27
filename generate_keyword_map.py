@@ -412,10 +412,12 @@ def generate_keyword_map():
     # Sort by score (descending)
     final_keywords.sort(key=lambda x: x['score'], reverse=True)
     
-    # Generate clean TXT file
+    # Generate both human-readable TXT file and machine-readable JSON file
     output_file = '/Users/ethan/tiktok_scraper/keyword_score_map.txt'
+    json_output_file = '/Users/ethan/tiktok_scraper/keyword_score_map.json'
     
     print(f"Writing transcription & comment keyword map to {output_file}...")
+    print(f"Writing machine-readable JSON to {json_output_file}...")
     
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write("=" * 90 + "\n")
@@ -468,17 +470,98 @@ def generate_keyword_map():
         f.write("Keywords extracted from spoken content and user comments only\n")
         f.write("=" * 90 + "\n")
     
+    # Generate machine-readable JSON file for live scoring systems
+    print(f"Writing JSON format for automated systems...")
+    
+    # Create JSON structure optimized for live scoring
+    json_data = {
+        "metadata": {
+            "generated_at": "2025-07-27T02:10:00Z",
+            "source": "transcriptions_and_comments_only",
+            "total_videos_analyzed": total_videos,
+            "total_keywords": len(final_keywords),
+            "timing_factor_enabled": True,
+            "stopwords_filtered": len(stopwords),
+            "description": "TikTok keyword scoring with timing-aware algorithm"
+        },
+        "scoring_algorithm": {
+            "timing_bonuses": {
+                "0-5_seconds": 1.0,
+                "5-15_seconds": 0.8,
+                "15-30_seconds": 0.6,
+                "30+_seconds": 0.4,
+                "comment_keywords": 0.7
+            },
+            "engagement_thresholds": {
+                "high_engagement": 0.2,
+                "medium_engagement": 0.15
+            },
+            "early_appearance_bonus": 0.2,
+            "timing_multiplier_range": [0.7, 1.0]
+        },
+        "keywords": {}
+    }
+    
+    # Convert keywords to machine-readable format
+    for keyword_data in final_keywords:
+        keyword = keyword_data['keyword']
+        json_data["keywords"][keyword] = {
+            "score": keyword_data['score'],
+            "frequency": keyword_data['frequency'],
+            "video_count": keyword_data['video_count'],
+            "metrics": {
+                "avg_engagement": keyword_data['avg_engagement'],
+                "avg_views": keyword_data['avg_views'],
+                "avg_likes": keyword_data['avg_likes']
+            },
+            "timing": {
+                "avg_timing_bonus": keyword_data['avg_timing_bonus'],
+                "early_appearance_ratio": keyword_data['early_appearance_ratio'],
+                "early_appearances": keyword_data['early_appearances']
+            },
+            "performance_indicators": {
+                "viral_potential": "high" if keyword_data['score'] > 3.0 else "medium" if keyword_data['score'] > 1.5 else "low",
+                "timing_preference": "early" if keyword_data['avg_timing_bonus'] > 0.7 else "neutral",
+                "consistency": "high" if keyword_data['early_appearance_ratio'] > 0.3 else "medium" if keyword_data['early_appearance_ratio'] > 0.1 else "low"
+            }
+        }
+    
+    # Create lookup table for fast keyword scoring
+    json_data["lookup_table"] = {
+        keyword_data['keyword']: keyword_data['score'] 
+        for keyword_data in final_keywords
+    }
+    
+    # Create performance tiers for quick categorization
+    json_data["performance_tiers"] = {
+        "viral": [kw['keyword'] for kw in final_keywords if kw['score'] > 3.0],
+        "high": [kw['keyword'] for kw in final_keywords if 1.5 <= kw['score'] <= 3.0],
+        "medium": [kw['keyword'] for kw in final_keywords if 0.8 <= kw['score'] < 1.5],
+        "low": [kw['keyword'] for kw in final_keywords if kw['score'] < 0.8]
+    }
+    
+    # Write JSON file
+    with open(json_output_file, 'w', encoding='utf-8') as json_file:
+        json.dump(json_data, json_file, indent=2, ensure_ascii=False)
+    
     print(f"✅ Clean keyword map generated successfully!")
-    print(f"📍 Output: {output_file}")
+    print(f"📍 Human-readable output: {output_file}")
+    print(f"🤖 Machine-readable output: {json_output_file}")
     print(f"📊 Total meaningful keywords: {len(final_keywords)}")
     if final_keywords:
         print(f"🏆 Top keyword: '{final_keywords[0]['keyword']}' (Score: {final_keywords[0]['score']:.4f})")
     
-    return output_file
+    return output_file, json_output_file
 
 if __name__ == "__main__":
     try:
-        output_file = generate_keyword_map()
+        output_files = generate_keyword_map()
+        if isinstance(output_files, tuple):
+            output_file, json_output_file = output_files
+        else:
+            output_file = output_files
+            json_output_file = None
+        
         if output_file and os.path.exists(output_file):
             # Show preview of first 10 keywords
             print("\n📋 PREVIEW (first 10 clean keywords):")
