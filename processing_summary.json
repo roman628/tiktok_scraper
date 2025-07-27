@@ -1,0 +1,14 @@
+{
+  "total_urls": 2,
+  "successful_count": 1,
+  "failed_count": 0,
+  "skipped_count": 0,
+  "duplicate_count": 1473,
+  "started_at": "2025-07-25T12:15:18.989431",
+  "completed_at": "2025-07-25T12:15:30.211738",
+  "processing_rate": 5.346494263612642,
+  "success_rate": 100.0,
+  "failed_urls": [],
+  "errors": [],
+  "worker_stats": []
+}
