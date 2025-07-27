@@ -163,8 +163,47 @@ def is_meaningful_keyword(word, stopwords):
     
     return True
 
+def extract_keywords_with_timing(text, stopwords, video_duration=60):
+    """Extract keywords with timing information for transcription scoring"""
+    if not text:
+        return []
+    
+    # Clean text and extract words with positions
+    text_clean = re.sub(r'[^\w\s]', ' ', text.lower())
+    words = re.findall(r'\b[a-zA-Z]+\b', text_clean)
+    
+    # Filter for meaningful keywords and calculate timing scores
+    keywords_with_scores = []
+    text_length = len(text_clean)
+    
+    for i, word in enumerate(words):
+        if is_meaningful_keyword(word, stopwords):
+            # Calculate position in text (0-1 ratio)
+            position_ratio = i / len(words) if len(words) > 0 else 0
+            
+            # Estimate time position (assuming even speech distribution)
+            estimated_time = position_ratio * video_duration
+            
+            # Calculate timing bonus (1.0 for first 5 seconds, decreasing after)
+            if estimated_time <= 5:
+                timing_bonus = 1.0  # Full bonus for first 5 seconds
+            elif estimated_time <= 15:
+                timing_bonus = 0.8  # Good bonus for 5-15 seconds
+            elif estimated_time <= 30:
+                timing_bonus = 0.6  # Medium bonus for 15-30 seconds
+            else:
+                timing_bonus = 0.4  # Reduced bonus after 30 seconds
+            
+            keywords_with_scores.append({
+                'keyword': word,
+                'timing_bonus': timing_bonus,
+                'estimated_time': estimated_time
+            })
+    
+    return keywords_with_scores
+
 def extract_keywords_fallback(text, stopwords):
-    """Extract clean, meaningful keywords"""
+    """Extract clean, meaningful keywords (for comment text without timing)"""
     if not text:
         return []
     
@@ -229,6 +268,7 @@ def generate_keyword_map():
         
         # Extract text content - ONLY from transcriptions and comments
         transcription = video.get('whisper_transcription', '') or ''
+        video_duration = video.get('duration', 60)  # Default to 60 seconds if not available
         
         # Extract comment text if available
         comment_text = ''
@@ -237,16 +277,48 @@ def generate_keyword_map():
             comment_texts = [comment.get('comment_text', '') for comment in top_comments if comment.get('comment_text')]
             comment_text = ' '.join(comment_texts)
         
-        # Combine transcription and comment content only
-        all_text = f"{transcription} {comment_text}"
+        # Extract keywords with timing information for transcriptions
+        transcription_keywords = extract_keywords_with_timing(transcription, stopwords, video_duration)
         
-        # Extract clean keywords (no names)
-        keywords = extract_keywords_fallback(all_text, stopwords)
+        # Extract regular keywords from comments (no timing bonus)
+        comment_keywords = extract_keywords_fallback(comment_text, stopwords)
+        
+        # Combine all unique keywords
+        all_keywords = {}
+        
+        # Add transcription keywords with timing bonuses
+        for kw_data in transcription_keywords:
+            keyword = kw_data['keyword']
+            if keyword not in all_keywords:
+                all_keywords[keyword] = {
+                    'timing_bonus': kw_data['timing_bonus'],
+                    'sources': ['transcription'],
+                    'estimated_time': kw_data['estimated_time']
+                }
+            else:
+                # If keyword appears multiple times, use the best timing bonus
+                all_keywords[keyword]['timing_bonus'] = max(
+                    all_keywords[keyword]['timing_bonus'], 
+                    kw_data['timing_bonus']
+                )
+        
+        # Add comment keywords (no timing bonus, but still valuable)
+        for keyword in comment_keywords:
+            if keyword not in all_keywords:
+                all_keywords[keyword] = {
+                    'timing_bonus': 0.7,  # Standard bonus for comment keywords
+                    'sources': ['comment'],
+                    'estimated_time': None
+                }
+            else:
+                all_keywords[keyword]['sources'].append('comment')
+        
+        keywords = list(all_keywords.keys())
         
         # Calculate engagement score
         engagement_score = calculate_engagement_score(video)
         
-        # Update keyword data
+        # Update keyword data with timing bonuses
         for keyword in keywords:
             if keyword not in keyword_data:
                 keyword_data[keyword] = {
@@ -255,16 +327,29 @@ def generate_keyword_map():
                     'total_engagement': 0,
                     'videos': [],
                     'view_counts': [],
-                    'like_counts': []
+                    'like_counts': [],
+                    'timing_bonuses': [],
+                    'early_appearances': 0,  # Count of appearances in first 5 seconds
+                    'total_appearances': 0
                 }
+            
+            # Get timing bonus for this keyword in this video
+            timing_bonus = all_keywords[keyword]['timing_bonus']
+            estimated_time = all_keywords[keyword].get('estimated_time')
             
             keyword_data[keyword]['frequency'] += 1
             keyword_data[keyword]['total_engagement'] += engagement_score
             keyword_data[keyword]['videos'].append(video.get('video_id', ''))
             keyword_data[keyword]['view_counts'].append(video.get('view_count', 0))
             keyword_data[keyword]['like_counts'].append(video.get('like_count', 0))
+            keyword_data[keyword]['timing_bonuses'].append(timing_bonus)
+            keyword_data[keyword]['total_appearances'] += 1
             
-            # Enhanced scoring: engagement + frequency bonus + viral potential
+            # Track early appearances (first 5 seconds)
+            if estimated_time is not None and estimated_time <= 5:
+                keyword_data[keyword]['early_appearances'] += 1
+            
+            # Enhanced scoring: engagement + viral potential + timing bonus
             base_score = engagement_score * 10  # Scale engagement
             viral_bonus = 1.0
             if engagement_score > 0.2:  # High engagement
@@ -272,7 +357,9 @@ def generate_keyword_map():
             elif engagement_score > 0.15:  # Medium-high engagement
                 viral_bonus = 1.2
             
-            keyword_data[keyword]['total_score'] += base_score * viral_bonus
+            # Apply timing bonus to the score
+            final_score = base_score * viral_bonus * timing_bonus
+            keyword_data[keyword]['total_score'] += final_score
     
     print("Calculating final scores and filtering...")
     
@@ -286,10 +373,18 @@ def generate_keyword_map():
         avg_engagement = data['total_engagement'] / data['frequency']
         avg_views = sum(data['view_counts']) / len(data['view_counts'])
         avg_likes = sum(data['like_counts']) / len(data['like_counts'])
+        avg_timing_bonus = sum(data['timing_bonuses']) / len(data['timing_bonuses'])
+        early_appearance_ratio = data['early_appearances'] / data['total_appearances']
         
-        # Enhanced scoring algorithm
+        # Enhanced scoring algorithm with timing consideration
         frequency_score = min(data['frequency'] / 5, 3.0)  # Frequency bonus (cap at 3.0)
         engagement_multiplier = 1 + avg_engagement * 2  # Engagement boost
+        
+        # Timing multiplier - rewards keywords that appear early
+        timing_multiplier = 0.7 + (avg_timing_bonus * 0.3)  # Range: 0.7 to 1.0
+        
+        # Early appearance bonus - extra boost for keywords that consistently appear early
+        early_bonus = 1.0 + (early_appearance_ratio * 0.2)  # Up to 20% bonus
         
         # Rarity bonus for less common but high-performing keywords
         rarity_bonus = 1.0
@@ -298,8 +393,8 @@ def generate_keyword_map():
         elif data['frequency'] < 10 and avg_engagement > 0.12:
             rarity_bonus = 1.1
         
-        # Final score calculation
-        final_score = (data['total_score'] / data['frequency']) * frequency_score * engagement_multiplier * rarity_bonus
+        # Final score calculation with timing factors
+        final_score = (data['total_score'] / data['frequency']) * frequency_score * engagement_multiplier * timing_multiplier * early_bonus * rarity_bonus
         
         final_keywords.append({
             'keyword': keyword,
@@ -308,7 +403,10 @@ def generate_keyword_map():
             'avg_engagement': round(avg_engagement, 6),
             'avg_views': round(avg_views, 0),
             'avg_likes': round(avg_likes, 0),
-            'video_count': len(set(data['videos']))
+            'video_count': len(set(data['videos'])),
+            'avg_timing_bonus': round(avg_timing_bonus, 3),
+            'early_appearance_ratio': round(early_appearance_ratio, 3),
+            'early_appearances': data['early_appearances']
         })
     
     # Sort by score (descending)
@@ -321,19 +419,20 @@ def generate_keyword_map():
     
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write("=" * 90 + "\n")
-        f.write("TIKTOK CLEAN KEYWORD SCORING MAP - TRANSCRIPTIONS & COMMENTS ONLY\n")
-        f.write("=" * 90 + "\n")
+        f.write("TIKTOK TIMING-AWARE KEYWORD SCORING MAP - TRANSCRIPTIONS & COMMENTS\n")
+        f.write("=" * 100 + "\n")
         f.write(f"Generated from {total_videos} videos in master2.json\n")
         f.write(f"Source: Transcriptions and comment content only (excludes titles/descriptions)\n")
+        f.write(f"Timing Factor: Keywords in first 5 seconds get highest scores, decreasing over time\n")
         f.write(f"Total meaningful keywords found: {len(final_keywords)}\n")
         f.write(f"Filtered out names and noise words using {len(stopwords)} stopwords\n")
         f.write("=" * 90 + "\n\n")
         
-        f.write("FORMAT: KEYWORD | SCORE | FREQ | AVG_ENGAGEMENT | AVG_VIEWS | AVG_LIKES | VIDEOS\n")
-        f.write("-" * 90 + "\n\n")
+        f.write("FORMAT: KEYWORD | SCORE | FREQ | AVG_ENGAGEMENT | AVG_VIEWS | AVG_LIKES | VIDEOS | TIMING | EARLY%\n")
+        f.write("-" * 100 + "\n\n")
         
         for i, item in enumerate(final_keywords, 1):
-            line = f"{i:4d}. {item['keyword']:<20} | {item['score']:8.4f} | {item['frequency']:4d} | {item['avg_engagement']:10.6f} | {item['avg_views']:9.0f} | {item['avg_likes']:8.0f} | {item['video_count']:3d}\n"
+            line = f"{i:4d}. {item['keyword']:<20} | {item['score']:8.4f} | {item['frequency']:4d} | {item['avg_engagement']:10.6f} | {item['avg_views']:9.0f} | {item['avg_likes']:8.0f} | {item['video_count']:3d} | {item['avg_timing_bonus']:6.3f} | {item['early_appearance_ratio']:5.1%}\n"
             f.write(line)
         
         f.write("\n" + "=" * 90 + "\n")
@@ -341,7 +440,7 @@ def generate_keyword_map():
         f.write("=" * 90 + "\n")
         
         for i, item in enumerate(final_keywords[:30], 1):
-            f.write(f"{i:2d}. {item['keyword']:<18} - Score: {item['score']:8.4f} | Freq: {item['frequency']:3d} | Engagement: {item['avg_engagement']:.4f}\n")
+            f.write(f"{i:2d}. {item['keyword']:<18} - Score: {item['score']:8.4f} | Freq: {item['frequency']:3d} | Engagement: {item['avg_engagement']:.4f} | Timing: {item['avg_timing_bonus']:.3f} | Early: {item['early_appearance_ratio']:.1%}\n")
         
         f.write("\n" + "=" * 90 + "\n")
         f.write("CONTENT CATEGORIES IDENTIFIED\n")
