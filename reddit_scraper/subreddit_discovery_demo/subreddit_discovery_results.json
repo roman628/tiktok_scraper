@@ -1,0 +1,111 @@
+{
+  "discovery_summary": {
+    "total_usernames_extracted": 25,
+    "successful_users": 21,
+    "failed_users": 4,
+    "subreddits_discovered": 6,
+    "timestamp": "2025-07-29T16:35:46.668898"
+  },
+  "top_subreddits": [
+    {
+      "subreddit": "aitah",
+      "user_count": 8,
+      "users": [
+        "conscious_shine_8265",
+        "scared-weakness-6250",
+        "cold_bowl_of_nothing",
+        "clarazn",
+        "paincomfortable8891",
+        "born_researcher6688",
+        "one_handle6607",
+        "helpful_listen_1765"
+      ],
+      "category": "general"
+    },
+    {
+      "subreddit": "relationships",
+      "user_count": 6,
+      "users": [
+        "conscious_shine_8265",
+        "ccboyf",
+        "clarazn",
+        "amethystpeony",
+        "antibabysitter",
+        "alexander_thompson"
+      ],
+      "category": "relationships"
+    },
+    {
+      "subreddit": "relationship_advice",
+      "user_count": 5,
+      "users": [
+        "dangerousgrocery",
+        "throwra_cw997",
+        "amethystpeony",
+        "u-slash",
+        "poiuytrewqasdfghjkl4"
+      ],
+      "category": "relationships"
+    },
+    {
+      "subreddit": "amitheasshole",
+      "user_count": 5,
+      "users": [
+        "scared-weakness-6250",
+        "sweet-fun179",
+        "clarazn",
+        "invincible336699",
+        "u-slash"
+      ],
+      "category": "relationships"
+    },
+    {
+      "subreddit": "sex",
+      "user_count": 3,
+      "users": [
+        "u-slash",
+        "clarazn",
+        "alexander_thompson"
+      ],
+      "category": "general"
+    },
+    {
+      "subreddit": "legaladvice",
+      "user_count": 2,
+      "users": [
+        "u-slash",
+        "sweet-fun179"
+      ],
+      "category": "advice"
+    }
+  ],
+  "successful_users": [
+    "heartbreakcity",
+    "amethystpeony",
+    "okopinion5333",
+    "unknown",
+    "helpful_listen_1765",
+    "dangerousgrocery",
+    "cold_bowl_of_nothing",
+    "clarazn",
+    "invincible336699",
+    "throwra_cw997",
+    "paincomfortable8891",
+    "born_researcher6688",
+    "u-slash",
+    "alexander_thompson",
+    "ccboyf",
+    "antibabysitter",
+    "poiuytrewqasdfghjkl4",
+    "one_handle6607",
+    "conscious_shine_8265",
+    "scared-weakness-6250",
+    "sweet-fun179"
+  ],
+  "failed_users": [
+    "tokengirlengineer (no posts/private)",
+    "betty (no posts/private)",
+    "reasonable-while-966 (not found)",
+    "snowboardingblues (not found)"
+  ]
+}

@@ -1,0 +1,16 @@
+praw==7.7.1
+requests==2.32.4
+asyncio==3.4.3
+aiohttp==3.10.10
+dataclasses-json==0.6.7
+python-dotenv==1.0.1
+pandas==2.2.3
+matplotlib==3.9.3
+seaborn==0.13.2
+plotly==5.24.1
+beautifulsoup4==4.13.4
+selenium==4.34.2
+fake-useragent==1.5.1
+tenacity==9.0.0
+click==8.1.8
+rich==13.9.4

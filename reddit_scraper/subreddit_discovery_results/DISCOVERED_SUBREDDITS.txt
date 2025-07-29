@@ -1,0 +1,45 @@
+🎯 Reddit Subreddit Discovery Results
+==================================================
+
+📊 Discovery Summary:
+- Total usernames checked: 30
+- Successful users: 22
+- Failed users: 8
+- Unique subreddits discovered: 5
+
+🏆 Discovered Subreddits (Ranked by Activity):
+
+ 1. r/aitah (relationships)
+    👥 10 users: alternative_site1468, common-objective6338, difficult-search-327, helpful_listen_1765, literallythedevil--...
+
+ 2. r/relationships (relationships)
+    👥 5 users: alexander_thompson, amethystpeony, luka1491, throwtarantula, worldsgonemadd
+
+ 3. r/amitheasshole (relationships)
+    👥 4 users: alternative_site1468, interesting-fox-4506, kitchen_earth7954, scared-weakness-6250
+
+ 4. r/notinteresting (general)
+    👥 2 users: heartbreakcity, luka1491
+
+ 5. r/relationship_advice (relationships)
+    👥 2 users: amethystpeony, poiuytrewqasdfghjkl4
+
+📂 Categories Found:
+
+- relationships: 4 subreddits
+- general: 1 subreddits
+
+🎯 FINAL SUBREDDIT LIST (No Duplicates):
+
+1. r/aitah
+2. r/relationships
+3. r/amitheasshole
+4. r/notinteresting
+5. r/relationship_advice
+
+⏰ Generated: 2025-07-29 16:42:25
+
+💡 Next Steps:
+- Use these subreddits for content monitoring
+- Set up Reddit API for deeper post scraping
+- Track popular posts from these communities
