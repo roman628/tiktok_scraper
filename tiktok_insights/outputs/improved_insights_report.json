@@ -1,0 +1,133 @@
+{
+  "generated_at": "2025-07-30T05:12:28.870065",
+  "total_videos_analyzed": 1774,
+  "posting_time_insights": {
+    "best_times_by_day": {
+      "Monday": [
+        16,
+        0,
+        15
+      ],
+      "Tuesday": [
+        23,
+        20,
+        15
+      ],
+      "Wednesday": [
+        14,
+        20,
+        4
+      ],
+      "Thursday": [
+        23,
+        8,
+        18
+      ],
+      "Friday": [
+        8,
+        13,
+        1
+      ],
+      "Saturday": [
+        0,
+        4,
+        19
+      ],
+      "Sunday": [
+        15,
+        19,
+        22
+      ]
+    },
+    "worst_times_by_day": {
+      "Monday": [
+        23,
+        18,
+        4
+      ],
+      "Tuesday": [
+        21,
+        0,
+        3
+      ],
+      "Wednesday": [
+        23,
+        10,
+        0
+      ],
+      "Thursday": [
+        0,
+        17,
+        10
+      ],
+      "Friday": [
+        5,
+        12,
+        23
+      ],
+      "Saturday": [
+        8,
+        5,
+        3
+      ],
+      "Sunday": [
+        20,
+        4,
+        5
+      ]
+    },
+    "top_5_hours_overall": [
+      15,
+      0,
+      23,
+      20,
+      4
+    ],
+    "recommendations": [
+      "Post between 15:00-0:00 for maximum reach",
+      "Weekend evenings show higher engagement rates",
+      "Avoid early morning hours (2:00-6:00) across all days"
+    ]
+  },
+  "genre_insights": {
+    "top_genre": "food",
+    "top_3_genres": [
+      "food",
+      "comedy",
+      "educational"
+    ],
+    "avg_views_top_genre": 7136818.18,
+    "recommendations": [
+      "Focus on food content for highest views",
+      "Diversify content across top 3 performing genres",
+      "Monitor trending topics weekly for content ideas"
+    ]
+  },
+  "content_strategy": {
+    "top_topics": [
+      "relationship",
+      "aita",
+      "update",
+      "minecraftparkour",
+      "redditreadings"
+    ],
+    "top_hashtags": [
+      "chef",
+      "reactions",
+      "kayandtayofficial",
+      "marriedlife",
+      "couplescontent"
+    ],
+    "recommendations": [
+      "Include trending topics in video titles and descriptions",
+      "Use 3-5 relevant hashtags per video",
+      "Combine popular genres with trending topics"
+    ]
+  },
+  "key_takeaways": [
+    "Timing is crucial - post during peak hours for your target audience",
+    "Genre selection significantly impacts view counts",
+    "Consistent posting schedule increases overall engagement",
+    "Weekend content tends to perform better than weekday posts"
+  ]
+}

@@ -69,7 +69,7 @@ Ensure your `master2.json` file is in the parent directory with the following st
 
 #### Option A: Complete Dashboard (Recommended)
 ```bash
-cd scripts
+cd tiktok_insights/scripts
 python dashboard.py
 ```
 

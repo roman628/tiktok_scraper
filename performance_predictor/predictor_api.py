@@ -31,7 +31,7 @@ except ImportError:
     print("Flask not installed. Install with: pip install flask flask-cors")
     exit(1)
 
-from tiktok_predictor import TikTokPredictionAPI
+from .tiktok_predictor import TikTokPredictionAPI
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)

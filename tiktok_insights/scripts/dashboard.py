@@ -338,7 +338,7 @@ class TikTokInsightsDashboard:
 def main():
     """Main function to run the complete TikTok insights analysis"""
     # Configuration
-    data_file = '../master2.json'
+    data_file = '../../master2.json'
     
     # Create and run dashboard
     dashboard = TikTokInsightsDashboard(data_file)

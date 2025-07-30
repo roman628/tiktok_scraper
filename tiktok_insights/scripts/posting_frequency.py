@@ -450,7 +450,7 @@ class PostingFrequencyAnalyzer:
 
 def main():
     # Configuration
-    data_file = '../master2.json'
+    data_file = '../../master2.json'
     output_dir = '../outputs'
     
     if not os.path.exists(data_file):
