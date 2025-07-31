@@ -28,7 +28,7 @@ if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
 # Import the predictor classes at module level so pickle can find them
-from train_mrbeast import TikTokPerformancePredictor, TranscriptFeatureExtractor
+from train_ml import TikTokPerformancePredictor, TranscriptFeatureExtractor
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -59,12 +59,16 @@ async def load_model():
     
     try:
         
-        # Look for model file
+        # Look for model file (prioritize enhanced model)
         possible_paths = [
-            "/Users/ethan/tiktok_scraper/models/mrbeast.pkl",
-            "./models/mrbeast.pkl",
-            "../models/mrbeast.pkl",
-            "models/mrbeast.pkl"
+            "/Users/ethan/tiktok_scraper/models/enhanced_snoo.pkl",
+            "/Users/ethan/tiktok_scraper/models/snoo.pkl",
+            "./models/enhanced_snoo.pkl",
+            "./models/snoo.pkl",
+            "../models/enhanced_snoo.pkl",
+            "../models/snoo.pkl",
+            "models/enhanced_snoo.pkl",
+            "models/snoo.pkl"
         ]
         
         model_path = None

@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DATA_FILE="$PROJECT_ROOT/master2.json"
 MODEL_DIR="$PROJECT_ROOT/models"
-MODEL_FILE="$MODEL_DIR/mrbeast.pkl"
+MODEL_FILE="$MODEL_DIR/snoo.pkl"
 LOG_FILE="$SCRIPT_DIR/predictor.log"
 API_PORT="${API_PORT:-8080}"
 
@@ -47,8 +47,8 @@ check_dependencies() {
         exit 1
     fi
     
-    if [[ ! -f "$SCRIPT_DIR/train_mrbeast.py" ]]; then
-        error "Predictor script not found: $SCRIPT_DIR/train_mrbeast.py"
+    if [[ ! -f "$SCRIPT_DIR/train_ml.py" ]]; then
+        error "Predictor script not found: $SCRIPT_DIR/train_ml.py"
         exit 1
     fi
     
@@ -119,7 +119,7 @@ train_model() {
     fi
     
     cd "$SCRIPT_DIR"
-    python train_mrbeast.py "${args[@]}" 2>&1 | tee -a "$LOG_FILE"
+    python train_ml.py "${args[@]}" 2>&1 | tee -a "$LOG_FILE"
     
     if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
         success "Model training completed successfully"
@@ -150,7 +150,7 @@ predict_video() {
     fi
     
     cd "$SCRIPT_DIR"
-    python train_mrbeast.py predict --text "test prediction" 2>&1 | tee -a "$LOG_FILE"
+    python train_ml.py predict --text "test prediction" 2>&1 | tee -a "$LOG_FILE"
     
     if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
         success "Prediction completed"
@@ -172,7 +172,7 @@ model_info() {
         return 1
     fi
     
-    # Simple model info - just show file stats since train_mrbeast.py doesn't have info command
+    # Simple model info - just show file stats since train_ml.py doesn't have info command
     log "Model file: $MODEL_FILE"
     log "Model size: $(du -h "$MODEL_FILE" 2>/dev/null | cut -f1 || echo 'unknown')"
     log "Last modified: $(stat -f %Sm "$MODEL_FILE" 2>/dev/null || stat -c %y "$MODEL_FILE" 2>/dev/null || echo 'unknown')"

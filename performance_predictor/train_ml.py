@@ -441,6 +441,231 @@ class TranscriptFeatureExtractor:
         
         return discovered_patterns
     
+    def _discover_controversy_patterns(self, transcripts: List[str], scores: List[float]) -> Dict[str, Any]:
+        """Discover words that statistically correlate with high engagement (controversy detection)."""
+        import numpy as np
+        from scipy.stats import chi2_contingency
+        from collections import Counter
+        
+        # Split into high vs low performers
+        threshold = np.percentile(scores, 75)  # Top 25%
+        high_performers = [transcripts[i].lower() for i, score in enumerate(scores) if score >= threshold]
+        low_performers = [transcripts[i].lower() for i, score in enumerate(scores) if score < threshold]
+        
+        # Get word frequencies
+        high_words = Counter(' '.join(high_performers).split())
+        low_words = Counter(' '.join(low_performers).split())
+        
+        # Calculate statistical significance using chi-square
+        controversy_indicators = {}
+        
+        for word in high_words:
+            if high_words[word] >= 5:  # Minimum frequency threshold
+                high_count = high_words[word]
+                low_count = low_words.get(word, 0)
+                
+                # Create contingency table
+                observed = [[high_count, low_count], 
+                           [sum(high_words.values()) - high_count, sum(low_words.values()) - low_count]]
+                
+                try:
+                    chi2, p_value, _, _ = chi2_contingency(observed)
+                    if p_value < 0.05 and high_count > low_count:  # Statistically significant
+                        controversy_indicators[word] = {
+                            'chi2_score': chi2,
+                            'p_value': p_value,
+                            'high_freq': high_count,
+                            'low_freq': low_count
+                        }
+                except:
+                    continue
+        
+        return controversy_indicators
+    
+    def _discover_curiosity_patterns(self, transcripts: List[str], scores: List[float]) -> Dict[str, Any]:
+        """Discover curiosity gap patterns using mathematical analysis."""
+        import numpy as np
+        from scipy.stats import pearsonr
+        
+        curiosity_features = []
+        
+        for transcript, score in zip(transcripts, scores):
+            sentences = sent_tokenize(transcript.lower())
+            
+            # Mathematical patterns that indicate curiosity gaps
+            incomplete_patterns = 0
+            question_patterns = 0
+            temporal_progression = 0
+            
+            for i, sentence in enumerate(sentences):
+                words = sentence.split()
+                if len(words) > 0:
+                    # Count questions
+                    if '?' in sentence:
+                        question_patterns += 1
+                    
+                    # Look for temporal progression without hardcoded words
+                    if i < len(sentences) - 1:
+                        curr_nums = len([w for w in words if w.isdigit()])
+                        next_nums = len([w for w in sentences[i+1].split() if w.isdigit()])
+                        if curr_nums > 0 and next_nums > 0:
+                            temporal_progression += 1
+            
+            curiosity_features.append({
+                'question_density': question_patterns / len(sentences) if sentences else 0,
+                'temporal_progression': temporal_progression / len(sentences) if sentences else 0,
+                'score': score
+            })
+        
+        # Find correlations
+        discovered_patterns = {}
+        
+        if curiosity_features:
+            for pattern in ['question_density', 'temporal_progression']:
+                values = [f[pattern] for f in curiosity_features]
+                scores_list = [f['score'] for f in curiosity_features]
+                
+                try:
+                    correlation, p_value = pearsonr(values, scores_list)
+                    if not np.isnan(correlation) and abs(correlation) > 0.05:
+                        discovered_patterns[pattern] = {
+                            'correlation': correlation,
+                            'p_value': p_value,
+                            'mean_value': np.mean(values)
+                        }
+                except:
+                    pass
+        
+        return discovered_patterns
+    
+    def _discover_story_arc_patterns(self, transcripts: List[str], scores: List[float]) -> Dict[str, Any]:
+        """Discover story structure patterns using mathematical analysis."""
+        import numpy as np
+        from scipy.stats import pearsonr
+        
+        story_features = []
+        
+        for transcript, score in zip(transcripts, scores):
+            sentences = sent_tokenize(transcript)
+            sentence_lengths = [len(s.split()) for s in sentences]
+            
+            if len(sentence_lengths) > 3:
+                # Mathematical story structure analysis
+                pacing_variance = np.var(sentence_lengths)
+                dialogue_ratio = sum(1 for s in sentences if '"' in s or "'" in s) / len(sentences)
+                
+                # Tension progression (length changes)
+                first_half_avg = np.mean(sentence_lengths[:len(sentence_lengths)//2])
+                second_half_avg = np.mean(sentence_lengths[len(sentence_lengths)//2:])
+                tension_progression = second_half_avg - first_half_avg
+                
+                # Punctuation density analysis
+                punctuation_density = sum(transcript.count(p) for p in '.,!?;:') / len(transcript)
+                
+                story_features.append({
+                    'pacing_variance': pacing_variance,
+                    'dialogue_ratio': dialogue_ratio,
+                    'tension_progression': tension_progression,
+                    'punctuation_density': punctuation_density,
+                    'score': score
+                })
+        
+        # Find correlations
+        discovered_patterns = {}
+        
+        if story_features:
+            for pattern in ['pacing_variance', 'dialogue_ratio', 'tension_progression', 'punctuation_density']:
+                values = [f[pattern] for f in story_features]
+                scores_list = [f['score'] for f in story_features]
+                
+                try:
+                    correlation, p_value = pearsonr(values, scores_list)
+                    if not np.isnan(correlation) and abs(correlation) > 0.05:
+                        discovered_patterns[pattern] = {
+                            'correlation': correlation,
+                            'p_value': p_value,
+                            'mean_value': np.mean(values)
+                        }
+                except:
+                    pass
+        
+        return discovered_patterns
+    
+    def _discover_ngram_patterns(self, transcripts: List[str], scores: List[float]) -> Dict[str, Any]:
+        """Discover n-gram patterns that correlate with high performance."""
+        from sklearn.feature_extraction.text import CountVectorizer
+        import numpy as np
+        
+        # Create n-gram vectors (2-grams and 3-grams)
+        vectorizer = CountVectorizer(ngram_range=(2, 3), min_df=3, max_features=200)
+        
+        try:
+            ngram_matrix = vectorizer.fit_transform(transcripts)
+            feature_names = vectorizer.get_feature_names_out()
+            
+            # Calculate correlation between each n-gram and performance
+            ngram_correlations = {}
+            
+            for i, ngram in enumerate(feature_names):
+                ngram_counts = ngram_matrix[:, i].toarray().flatten()
+                correlation = np.corrcoef(ngram_counts, scores)[0, 1]
+                
+                if not np.isnan(correlation) and abs(correlation) > 0.08:  # Minimum correlation threshold
+                    ngram_correlations[ngram] = {
+                        'correlation': correlation,
+                        'frequency': np.sum(ngram_counts),
+                        'mean_score_when_present': np.mean([scores[j] for j in range(len(scores)) if ngram_counts[j] > 0])
+                    }
+            
+            return ngram_correlations
+            
+        except Exception as e:
+            logger.warning(f"Error in n-gram discovery: {e}")
+            return {}
+    
+    def _apply_curiosity_patterns(self, transcript: str, curiosity_patterns: Dict[str, Any]) -> Dict[str, float]:
+        """Apply discovered curiosity patterns to transcript."""
+        features = {}
+        sentences = sent_tokenize(transcript.lower())
+        
+        if sentences:
+            # Calculate curiosity features
+            question_density = transcript.count('?') / len(sentences)
+            
+            # Apply discovered patterns
+            for pattern_name, pattern_data in curiosity_patterns.items():
+                correlation = pattern_data.get('correlation', 0)
+                if pattern_name == 'question_density':
+                    features['curiosity_question_score'] = question_density * correlation
+                elif pattern_name == 'temporal_progression':
+                    # Simple temporal progression detection
+                    temporal_score = sum(1 for s in sentences if any(c.isdigit() for c in s)) / len(sentences)
+                    features['curiosity_temporal_score'] = temporal_score * correlation
+        
+        return features
+    
+    def _apply_ngram_patterns(self, transcript: str, ngram_patterns: Dict[str, Any]) -> Dict[str, float]:
+        """Apply discovered n-gram patterns to transcript."""
+        features = {}
+        
+        if not ngram_patterns:
+            return features
+        
+        transcript_lower = transcript.lower()
+        total_ngram_score = 0
+        matching_ngrams = 0
+        
+        for ngram, pattern_data in ngram_patterns.items():
+            if ngram in transcript_lower:
+                correlation = pattern_data.get('correlation', 0)
+                total_ngram_score += correlation
+                matching_ngrams += 1
+        
+        features['ngram_pattern_score'] = total_ngram_score
+        features['ngram_pattern_matches'] = matching_ngrams
+        
+        return features
+    
     def _discover_emotional_journey_patterns(self, transcripts: List[str], scores: List[float]) -> Dict[str, Any]:
         """Discover how emotional progression throughout content affects performance."""
         import numpy as np
@@ -1058,12 +1283,297 @@ class TikTokPerformancePredictor:
             pass
             
         return features
+    
+    def learn_semantic_patterns(self, transcripts: List[str], scores: List[float]):
+        """Learn advanced semantic and emotional patterns."""
+        logger.info("Learning advanced semantic and emotional patterns...")
+        
+        semantic_insights = {
+            'content_patterns': self._discover_content_patterns(transcripts, scores),
+            'emotional_progressions': self._discover_emotional_journey_patterns(transcripts, scores),
+            'controversy_patterns': self._discover_controversy_patterns(transcripts, scores),
+            'curiosity_patterns': self._discover_curiosity_patterns(transcripts, scores),
+            'story_arc_patterns': self._discover_story_arc_patterns(transcripts, scores),
+            'ngram_patterns': self._discover_ngram_patterns(transcripts, scores)
+        }
+        
+        self.learned_patterns = semantic_insights
+        
+        logger.info("Completed advanced pattern analysis")
+        logger.info(f"Controversy patterns: {len(semantic_insights.get('controversy_patterns', {}))}")
+        logger.info(f"N-gram patterns: {len(semantic_insights.get('ngram_patterns', {}))}")
+    
+    def _discover_controversy_patterns(self, transcripts: List[str], scores: List[float]) -> Dict[str, Any]:
+        """Discover words that statistically correlate with high engagement."""
+        import numpy as np
+        try:
+            from scipy.stats import chi2_contingency
+        except ImportError:
+            logger.warning("SciPy not available - skipping controversy pattern discovery")
+            return {}
+        from collections import Counter
+        
+        threshold = np.percentile(scores, 75)
+        high_performers = [transcripts[i].lower() for i, score in enumerate(scores) if score >= threshold]
+        low_performers = [transcripts[i].lower() for i, score in enumerate(scores) if score < threshold]
+        
+        high_words = Counter(' '.join(high_performers).split())
+        low_words = Counter(' '.join(low_performers).split())
+        
+        controversy_indicators = {}
+        
+        for word in high_words:
+            if high_words[word] >= 5:
+                high_count = high_words[word]
+                low_count = low_words.get(word, 0)
+                
+                observed = [[high_count, low_count], 
+                           [sum(high_words.values()) - high_count, sum(low_words.values()) - low_count]]
+                
+                try:
+                    chi2, p_value, _, _ = chi2_contingency(observed)
+                    if p_value < 0.05 and high_count > low_count:
+                        controversy_indicators[word] = {
+                            'chi2_score': chi2,
+                            'p_value': p_value,
+                            'high_freq': high_count,
+                            'low_freq': low_count
+                        }
+                except:
+                    continue
+        
+        return controversy_indicators
+    
+    def _discover_curiosity_patterns(self, transcripts: List[str], scores: List[float]) -> Dict[str, Any]:
+        """Discover curiosity gap patterns using mathematical analysis."""
+        import numpy as np
+        try:
+            from scipy.stats import pearsonr
+        except ImportError:
+            logger.warning("SciPy not available - skipping curiosity pattern discovery")
+            return {}
+        
+        curiosity_features = []
+        
+        for transcript, score in zip(transcripts, scores):
+            sentences = sent_tokenize(transcript.lower())
+            
+            question_patterns = sum(1 for s in sentences if '?' in s)
+            temporal_progression = sum(1 for s in sentences if any(c.isdigit() for c in s))
+            
+            curiosity_features.append({
+                'question_density': question_patterns / len(sentences) if sentences else 0,
+                'temporal_progression': temporal_progression / len(sentences) if sentences else 0,
+                'score': score
+            })
+        
+        discovered_patterns = {}
+        
+        if curiosity_features:
+            for pattern in ['question_density', 'temporal_progression']:
+                values = [f[pattern] for f in curiosity_features]
+                scores_list = [f['score'] for f in curiosity_features]
+                
+                try:
+                    correlation, p_value = pearsonr(values, scores_list)
+                    if not np.isnan(correlation) and abs(correlation) > 0.05:
+                        discovered_patterns[pattern] = {
+                            'correlation': correlation,
+                            'p_value': p_value,
+                            'mean_value': np.mean(values)
+                        }
+                except:
+                    pass
+        
+        return discovered_patterns
+    
+    def _discover_story_arc_patterns(self, transcripts: List[str], scores: List[float]) -> Dict[str, Any]:
+        """Discover story structure patterns using mathematical analysis."""
+        import numpy as np
+        try:
+            from scipy.stats import pearsonr
+        except ImportError:
+            logger.warning("SciPy not available - skipping story arc pattern discovery")
+            return {}
+        
+        story_features = []
+        
+        for transcript, score in zip(transcripts, scores):
+            sentences = sent_tokenize(transcript)
+            sentence_lengths = [len(s.split()) for s in sentences]
+            
+            if len(sentence_lengths) > 3:
+                pacing_variance = np.var(sentence_lengths)
+                dialogue_ratio = sum(1 for s in sentences if '"' in s or "'" in s) / len(sentences)
+                punctuation_density = sum(transcript.count(p) for p in '.,!?;:') / len(transcript)
+                
+                story_features.append({
+                    'pacing_variance': pacing_variance,
+                    'dialogue_ratio': dialogue_ratio,
+                    'punctuation_density': punctuation_density,
+                    'score': score
+                })
+        
+        discovered_patterns = {}
+        
+        if story_features:
+            for pattern in ['pacing_variance', 'dialogue_ratio', 'punctuation_density']:
+                values = [f[pattern] for f in story_features]
+                scores_list = [f['score'] for f in story_features]
+                
+                try:
+                    correlation, p_value = pearsonr(values, scores_list)
+                    if not np.isnan(correlation) and abs(correlation) > 0.05:
+                        discovered_patterns[pattern] = {
+                            'correlation': correlation,
+                            'p_value': p_value,
+                            'mean_value': np.mean(values)
+                        }
+                except:
+                    pass
+        
+        return discovered_patterns
+    
+    def _discover_ngram_patterns(self, transcripts: List[str], scores: List[float]) -> Dict[str, Any]:
+        """Discover n-gram patterns that correlate with high performance."""
+        from sklearn.feature_extraction.text import CountVectorizer
+        import numpy as np
+        
+        vectorizer = CountVectorizer(ngram_range=(2, 3), min_df=3, max_features=200)
+        
+        try:
+            ngram_matrix = vectorizer.fit_transform(transcripts)
+            feature_names = vectorizer.get_feature_names_out()
+            
+            ngram_correlations = {}
+            
+            for i, ngram in enumerate(feature_names):
+                ngram_counts = ngram_matrix[:, i].toarray().flatten()
+                correlation = np.corrcoef(ngram_counts, scores)[0, 1]
+                
+                if not np.isnan(correlation) and abs(correlation) > 0.08:
+                    ngram_correlations[ngram] = {
+                        'correlation': correlation,
+                        'frequency': np.sum(ngram_counts)
+                    }
+            
+            return ngram_correlations
+            
+        except Exception as e:
+            logger.warning(f"Error in n-gram discovery: {e}")
+            return {}
+    
+    def _discover_content_patterns(self, transcripts: List[str], scores: List[float]) -> Dict[str, Any]:
+        """Discover patterns throughout content."""
+        import numpy as np
+        try:
+            from scipy.stats import pearsonr
+        except ImportError:
+            logger.warning("SciPy not available - skipping content pattern discovery")
+            return {}
+        from collections import defaultdict
+        
+        discovered_patterns = {}
+        segment_correlations = {}
+        
+        for segment_length in [5, 10, 20, 30]:
+            for position in ['start', 'middle', 'end']:
+                segment_features = []
+                
+                for transcript in transcripts:
+                    words = transcript.lower().split()
+                    if len(words) < segment_length:
+                        segment_features.append('')
+                        continue
+                    
+                    if position == 'start':
+                        segment = ' '.join(words[:segment_length])
+                    elif position == 'end':
+                        segment = ' '.join(words[-segment_length:])
+                    else:
+                        mid_point = len(words) // 2
+                        start_idx = max(0, mid_point - segment_length // 2)
+                        end_idx = min(len(words), start_idx + segment_length)
+                        segment = ' '.join(words[start_idx:end_idx])
+                    
+                    segment_features.append(segment)
+                
+                intensities = [abs(self.sia.polarity_scores(seg)['compound']) if seg and self.sia else 0 
+                             for seg in segment_features]
+                
+                try:
+                    correlation, p_value = pearsonr(intensities, scores)
+                    if not np.isnan(correlation):
+                        segment_correlations[f'{position}_{segment_length}_words'] = {
+                            'correlation': correlation,
+                            'p_value': p_value,
+                            'segment_length': segment_length,
+                            'position': position
+                        }
+                except:
+                    pass
+        
+        discovered_patterns['segment_importance'] = segment_correlations
+        return discovered_patterns
+    
+    def _discover_emotional_journey_patterns(self, transcripts: List[str], scores: List[float]) -> Dict[str, Any]:
+        """Discover emotional progression patterns."""
+        import numpy as np
+        try:
+            from scipy.stats import pearsonr
+        except ImportError:
+            logger.warning("SciPy not available - skipping emotional journey pattern discovery")
+            return {}
+        
+        emotional_features = []
+        
+        for transcript, score in zip(transcripts, scores):
+            sentences = sent_tokenize(transcript)
+            if len(sentences) < 3 or not self.sia:
+                continue
+                
+            sentence_sentiments = []
+            for sentence in sentences:
+                sentiment = self.sia.polarity_scores(sentence)
+                sentence_sentiments.append(sentiment['compound'])
+            
+            if len(sentence_sentiments) >= 3:
+                features = {
+                    'emotional_volatility': np.std(sentence_sentiments),
+                    'emotional_range': max(sentence_sentiments) - min(sentence_sentiments),
+                    'emotional_trend': sentence_sentiments[-1] - sentence_sentiments[0],
+                    'peak_intensity': max(abs(s) for s in sentence_sentiments),
+                    'opening_to_peak_change': max(sentence_sentiments) - sentence_sentiments[0],
+                    'score': score
+                }
+                emotional_features.append(features)
+        
+        discovered_patterns = {}
+        
+        if emotional_features:
+            for pattern in ['emotional_volatility', 'emotional_range', 'emotional_trend', 
+                          'peak_intensity', 'opening_to_peak_change']:
+                values = [f[pattern] for f in emotional_features]
+                scores_list = [f['score'] for f in emotional_features]
+                
+                try:
+                    correlation, p_value = pearsonr(values, scores_list)
+                    if not np.isnan(correlation):
+                        discovered_patterns[pattern] = {
+                            'correlation': correlation,
+                            'p_value': p_value,
+                            'mean_value': np.mean(values)
+                        }
+                except:
+                    pass
+        
+        return discovered_patterns
 
 
 def predict_performance_score(transcript: str) -> float:
     """Simple function interface for text scoring."""
     # Try to load existing model
-    model_path = "/Users/ethan/tiktok_scraper/models/mrbeast.pkl"
+    model_path = "/Users/ethan/tiktok_scraper/models/snoo.pkl"
     
     try:
         predictor = TikTokPerformancePredictor()
@@ -1086,7 +1596,7 @@ def main():
     parser.add_argument('command', choices=['train', 'predict'], help='Command to run')
     parser.add_argument('--data', default='/Users/ethan/tiktok_scraper/master2.json', 
                        help='Path to training data (master2.json)')
-    parser.add_argument('--model', default='/Users/ethan/tiktok_scraper/models/mrbeast.pkl',
+    parser.add_argument('--model', default='/Users/ethan/tiktok_scraper/models/snoo.pkl',
                        help='Path to model file')
     parser.add_argument('--text', help='Text to predict (for predict command)')
     
