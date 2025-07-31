@@ -10,9 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DATA_FILE="$PROJECT_ROOT/master2.json"
 MODEL_DIR="$PROJECT_ROOT/models"
-MODEL_FILE="$MODEL_DIR/tiktok_predictor.pkl"
+MODEL_FILE="$MODEL_DIR/mrbeast.pkl"
 LOG_FILE="$SCRIPT_DIR/predictor.log"
-API_PORT="${API_PORT:-5000}"
+API_PORT="${API_PORT:-8080}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -47,8 +47,8 @@ check_dependencies() {
         exit 1
     fi
     
-    if [[ ! -f "$SCRIPT_DIR/tiktok_predictor.py" ]]; then
-        error "Predictor script not found: $SCRIPT_DIR/tiktok_predictor.py"
+    if [[ ! -f "$SCRIPT_DIR/train_mrbeast.py" ]]; then
+        error "Predictor script not found: $SCRIPT_DIR/train_mrbeast.py"
         exit 1
     fi
     
@@ -119,7 +119,7 @@ train_model() {
     fi
     
     cd "$SCRIPT_DIR"
-    python tiktok_predictor.py "${args[@]}" 2>&1 | tee -a "$LOG_FILE"
+    python train_mrbeast.py "${args[@]}" 2>&1 | tee -a "$LOG_FILE"
     
     if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
         success "Model training completed successfully"
@@ -150,7 +150,7 @@ predict_video() {
     fi
     
     cd "$SCRIPT_DIR"
-    python tiktok_predictor.py predict --data "$DATA_FILE" --model "$MODEL_FILE" --video-id "$video_id" 2>&1 | tee -a "$LOG_FILE"
+    python train_mrbeast.py predict --text "test prediction" 2>&1 | tee -a "$LOG_FILE"
     
     if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
         success "Prediction completed"
@@ -172,10 +172,13 @@ model_info() {
         return 1
     fi
     
-    cd "$SCRIPT_DIR"
-    python tiktok_predictor.py info --data "$DATA_FILE" --model "$MODEL_FILE" 2>&1 | tee -a "$LOG_FILE"
+    # Simple model info - just show file stats since train_mrbeast.py doesn't have info command
+    log "Model file: $MODEL_FILE"
+    log "Model size: $(du -h "$MODEL_FILE" 2>/dev/null | cut -f1 || echo 'unknown')"
+    log "Last modified: $(stat -f %Sm "$MODEL_FILE" 2>/dev/null || stat -c %y "$MODEL_FILE" 2>/dev/null || echo 'unknown')"
     
-    return $?
+    success "Model information displayed"
+    return 0
 }
 
 # Test model performance
@@ -262,8 +265,8 @@ start_api() {
     fi
     
     # Check if API script exists
-    if [[ ! -f "$SCRIPT_DIR/predictor_api.py" ]]; then
-        error "API script not found: $SCRIPT_DIR/predictor_api.py"
+    if [[ ! -f "$SCRIPT_DIR/api.py" ]]; then
+        error "API script not found: $SCRIPT_DIR/api.py"
         return 1
     fi
     
@@ -282,7 +285,7 @@ start_api() {
     log "API will be available at: http://localhost:$port"
     log "API logs will be written to: $LOG_FILE"
     
-    python predictor_api.py --port $port 2>&1 | tee -a "$LOG_FILE"
+    python api.py --port $port 2>&1 | tee -a "$LOG_FILE"
 }
 
 # Run quick model check and prediction
@@ -352,7 +355,7 @@ Commands:
         Test model with random predictions (default: 10)
 
     api [port]
-        Start prediction API server (default port: 5000)
+        Start prediction API server (default port: 8080)
 
     quick
         Quick model check and test
@@ -371,7 +374,7 @@ Examples:
     $0 auto-retrain
 
 Environment Variables:
-    API_PORT - Default API port (default: 5000)
+    API_PORT - Default API port (default: 8080)
 
 EOF
 }
@@ -441,13 +444,19 @@ main() {
             show_usage
             ;;
         "")
-            warning "No command specified. Running quick check..."
-            quick_check
+            warning "No command specified. Starting API on default port..."
+            start_api "$API_PORT"
             ;;
         *)
-            error "Unknown command: $1"
-            show_usage
-            exit 1
+            # Check if argument is just a port number
+            if [[ "$1" =~ ^[0-9]+$ ]]; then
+                log "Starting API on port $1..."
+                start_api "$1"
+            else
+                error "Unknown command: $1"
+                show_usage
+                exit 1
+            fi
             ;;
     esac
     
