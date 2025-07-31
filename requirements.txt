@@ -1,0 +1,24 @@
+# Core dependencies optimized for CUDA 12.3.2 + cuDNN 9
+yt-dlp>=2024.12.0
+TikTokApi>=6.0.0
+
+# Faster-whisper with optimized CTranslate2 for CUDA 12.3+
+faster-whisper>=1.0.0
+ctranslate2>=4.5.0
+
+# Browser automation for TikTokApi
+playwright>=1.40.0
+
+# Console UI and progress
+rich>=13.0.0
+
+# Essential dependencies
+numpy>=1.24.0,<2.0.0
+requests>=2.31.0
+
+# Additional async support for TikTokApi
+aiofiles>=23.1.0
+
+# Required for some TikTok operations
+beautifulsoup4>=4.12.0
+lxml>=4.9.0

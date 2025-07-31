@@ -1,0 +1,37 @@
+branch names in order:
+	url-collector
+	master-downloader
+	model-trainer
+	performance-predictor
+	generate-insights
+	rework-1
+
+
+- url collector
+- metadata, transcript and comments extractor/ scraper (name that) master_downloader
+- script that trains model based off of master 2 (tiktok_performance_model_trainer)
+- script that uses model to make virality score off of a transcript. (performance_predictor) scores 1-100
+- insights dashboard for using master.json to create charts based off the data
+
+goal for rework-1 file structure:
+./
+	readme.md
+	master_downloader.py (master downloader branch)
+	tiktok_performance_model_trainer.py (currently tiktok_predictor.py) (model-trainer branch)
+	performance-predictor.py (currently predict_performance.py) (performance-predictor branch)
+	generate_insights.py (currently dashboard.py and many other scripts) (generate-insights branch)
+
+url_collector_extension/ (url-collector branch)
+	files for that
+
+models/
+	whatever
+
+assets/
+	master.json
+	urls.txt
+
+tiktok_insights/
+	stuff
+
+
