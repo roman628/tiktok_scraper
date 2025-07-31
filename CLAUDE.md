@@ -1,5 +1,8 @@
 # Claude Code Configuration - SPARC Development Environment (Batchtools Optimized)
 
+## TikTok Performance Prediction Model
+The `performance_predictor/train_ml.py` model predicts TikTok video performance (0-100 score) from transcript text. It's trained on Reddit posts converted to TikTok videos, learning which content patterns correlate with high engagement. The model uses supervised learning with an ensemble of Random Forest, XGBoost, and Ridge regression, discovering patterns from data rather than assuming what makes content viral.
+
 ## 🚨 CRITICAL: CONCURRENT EXECUTION FOR ALL ACTIONS
 
 **ABSOLUTE RULE**: ALL operations MUST be concurrent/parallel in a single message:

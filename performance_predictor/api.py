@@ -28,7 +28,7 @@ if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
 # Import the predictor classes at module level so pickle can find them
-from train_ml import TikTokPerformancePredictor, TranscriptFeatureExtractor
+from train_ml import TikTokPerformancePredictor
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -129,8 +129,8 @@ async def predict_performance(request: PredictionRequest):
         raise HTTPException(status_code=400, detail="Text too long (max 10,000 characters)")
     
     try:
-        # Get prediction
-        score = predictor.predict_score(request.text.strip())
+        # Get prediction using viral pattern learning
+        final_score = predictor.predict_score(request.text.strip())
         
         # Determine confidence based on text length and score
         text_length = len(request.text.split())
@@ -143,11 +143,11 @@ async def predict_performance(request: PredictionRequest):
             confidence = "high"
             
         # Adjust confidence based on score extremes
-        if score < 5 or score > 95:
+        if final_score < 5 or final_score > 95:
             confidence = "medium"  # Extreme scores might be less reliable
         
         return PredictionResponse(
-            score=round(score, 1),
+            score=round(final_score, 1),
             confidence=confidence,
             text_length=text_length
         )
@@ -158,7 +158,7 @@ async def predict_performance(request: PredictionRequest):
 
 @app.post("/batch_predict")
 async def batch_predict(texts: list[str]):
-    """Predict performance for multiple texts at once."""
+    """Predict performance for multiple texts at once using viral pattern learning."""
     
     if predictor is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
