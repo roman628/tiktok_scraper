@@ -1,3 +1,12 @@
+branch names in order:
+	url-collector
+	master-downloader
+	model-trainer
+	performance-predictor
+	generate-insights
+	rework-1
+
+
 - url collector
 - metadata, transcript and comments extractor/ scraper (name that) master_downloader
 - script that trains model based off of master 2 (tiktok_performance_model_trainer)
