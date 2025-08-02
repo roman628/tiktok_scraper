@@ -1,29 +1,79 @@
-# Ignore Python virtual environment
-venv/
-.hive-mind
+# IGNORE EVERYTHING BY DEFAULT
+*
+
+# THEN EXPLICITLY ALLOW ESSENTIAL SYSTEM COMPONENTS
+
+# Core System Files
+!main.py
+!requirements.txt
+!package.json
+!CLAUDE.md
+!README*.md
+!.gitignore
+
+# Core Application Directory
+!core/
+!core/**
+
+# ML Model (Performance Prediction)
+!ml_model/
+!ml_model/**
+
+# Essential Tools (Collection, Cleanup, Analysis)
+!tools/
+!tools/**
+
+# Essential Data Files
+!master2.json
+!urls.txt
+
+# Model Files
+!models/
+!models/**
+
+# Essential Scripts
+!run_*.sh
+!start-*.sh
+
+# Configuration Examples
+!*.example
+!*.env.example
+
+# Documentation
+!documentation/
+!documentation/**
+
+# Firefox Extension (URL Collector)
+!firefox_extension/
+!firefox_extension/**
+
+# TikTok Insights (Analysis Output)
+!tiktok_insights/
+!tiktok_insights/**
+
+# Video Analysis
+!video_analysis/
+!video_analysis/**
+
+# Keep any Python init files
+!__init__.py
+
+# But ignore sensitive/large files
 downloads/
-__pycache__/
-
-# Dependencies
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Output directories
+temp_downloads/
 output/
 test_output/
+backups/
+debug-logs/
+multiprocess-logs/
+venv/
+node_modules/
+__pycache__/
 
-# Log files
+# Ignore logs
 *.log
-scraping_log.txt
 
-# Configuration files (may contain sensitive data)
-config.json
-proxies.txt
-sessions.txt
-
-# OS generated files
+# Ignore OS files
 .DS_Store
 .DS_Store?
 ._*
@@ -32,69 +82,42 @@ sessions.txt
 ehthumbs.db
 Thumbs.db
 
-# IDE files
+# Ignore IDE files
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# Environment variables
+# Ignore sensitive environment files
 .env
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
 
-# Runtime files
+# Ignore temporary files
+tmp/
+temp/
 *.pid
 *.seed
 *.pid.lock
 
-# Coverage directory used by tools like istanbul
-coverage/
-
-# Temporary files
-tmp/
-temp/
-
-# Build files
+# Ignore build artifacts
 dist/
 build/
+coverage/
 
-# Test files
-test_*.txt
-test_*.py
-test_*.json
-
-# Temporary keyword analysis files
-*_generation.log
-*_generation_clean.log
-clean_keyword_*.txt
-definition_*.txt
-
-package-lock.json
-
-/backups
-
-# Claude Flow generated files
+# Ignore Claude Flow runtime files
 .claude/
 .roo/
-memory
+memory/
 .roomodes
 .claude/settings.local.json
 .mcp.json
 claude-flow.config.json
 .swarm/
 .hive-mind/
-memory/claude-flow-data.json
-memory/sessions/*
-!memory/sessions/README.md
-memory/agents/*
-!memory/agents/README.md
-coordination/memory_bank/*
-coordination/subtasks/*
-coordination/orchestration/*
 *.db
 *.db-journal
 *.db-wal
@@ -106,7 +129,13 @@ claude-flow.bat
 claude-flow.ps1
 hive-mind-prompt-*.txt
 
-# Log directories
-debug-logs/
-multiprocess-logs/
-temp_downloads/
+# Ignore deleted directories that are no longer needed
+reddit_scraper/
+scripts/
+performance_predictor/
+snoo-v1/
+legacy/
+broken/
+
+test*
+video_analysis/
