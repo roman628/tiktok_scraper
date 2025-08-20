@@ -96,3 +96,4 @@ URLs → Filter Duplicates → Process → {
 - Run tests after every change
 - See `/Users/ethan/tiktok_scraper-1/tiktok_data_collection_uml_analysis.md` for class structure
 
+**NOTE** comment extraction has been patched indefinitely and there is nothing we can do as of 8/20/2025 to fix it 
