@@ -8,17 +8,23 @@ the ideal layout:
 
 extension/
     (contains the firefox_extension/ stuff)
-model/
+ml/
     api.py
+    train_ml.py
     start_api.sh
     models/
         snoo.pkl
 data/
     urls.txt
     master2.json
-scripts/
-    collector.py
-    train_ml.py
+src/
+    video_extractor.py
+    comment_extractor.py
+    transcript_extractor.py
+    data_manager.py (includes fix_json functionality)
+    url_processor.py
+    resource_manager.py
+    models.py
 dashboard/
     frontend stuff for the dashboard
 tests/
@@ -29,6 +35,7 @@ requirements.txt
 README.md
 diagram.png
 .gitignore
+collector.py
 
 as we develop this out, ensure that the changes are respecting this, it should remain very clean throughout
 
@@ -93,4 +100,41 @@ These four scripts are currently functional but need refactoring to be more effi
 5. Optimize for fewer lines while maintaining readability
 6. Eliminate redundant JSON handling and URL processing code
 
+## Refactoring Plan: 4 Scripts → 8 Focused Classes
+
+### Current State (Bloated):
+1. `robust_master_downloader.py` - **1,977 lines** (doing everything!)
+2. `tiktok_scraper.py` - ~800+ lines
+3. `comment_extractor.py` - ~300 lines  
+4. `memory_efficient_append.py` - ~100 lines
+**Total: ~3,200+ lines of messy, duplicated code**
+
+### Target State (Clean):
+```python
+1. collector.py (~200 lines) - Main orchestrator from robust_master_downloader.py
+2. video_extractor.py (~250 lines) - Core video logic 
+3. comment_extractor.py (~150 lines) - Comment extraction
+4. transcript_extractor.py (~120 lines) - Whisper transcription
+5. data_manager.py (~180 lines) - All JSON operations consolidated (includes fix_json, memory_efficient_append functionality)
+6. url_processor.py (~80 lines) - URL handling (3 implementations → 1)
+7. resource_manager.py (~100 lines) - Memory/process cleanup
+8. models.py (~60 lines) - Clean data classes
+```
+**Target: ~1,140 lines (64% reduction!)**
+
+### Key Consolidations:
+- **JSON operations**: 4 different implementations → 1 `DataManager`
+  - fix_json.py (JSON repair/recovery)
+  - memory_efficient_append.py (streaming operations)
+  - JSON validation and duplicate detection
+  - All read/write operations
+- **URL processing**: 3 scattered implementations → 1 `URLProcessor`
+- **Resource cleanup**: Duplicated everywhere → 1 `ResourceManager`
+- **Error handling**: Scattered retry logic → Unified approach
+
+The robust_master_downloader.py is currently handling video downloading, comment extraction, transcription, JSON management, URL processing, resource cleanup, worker management, error handling, and progress tracking all in one massive 1,977-line file. This will be split into focused, testable components.
+
 use the codebase-structure-analyzer when analyzing large files to get quick insights of codebase **USE THIS AGENT VERY FREQUENTLY**
+
+more about how the class structure should be designed can be found here: /Users/ethan/tiktok_scraper-1/tiktok_data_collection_uml_analysis.md
+

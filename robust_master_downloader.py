@@ -227,7 +227,7 @@ def auto_clean_master_json(master_file_path):
                 print(f"🔧 Attempting to fix corrupted {master_file_path}...")
                 try:
                     import subprocess
-                    result = subprocess.run(['python', './scripts/cleanup/fix_json.py', master_file_path], 
+                    result = subprocess.run(['python', './fix_json.py', master_file_path], 
                                           capture_output=True, text=True, timeout=60)
                     if result.returncode == 0:
                         print("✅ Master JSON file fixed successfully, retrying cleanup...")
@@ -529,7 +529,7 @@ class RobustTikTokProcessor:
         try:
             # Import and run the fix_json functionality
             import subprocess
-            result = subprocess.run(['python', './scripts/cleanup/fix_json.py', self.master_file], 
+            result = subprocess.run(['python', './fix_json.py', self.master_file], 
                                   capture_output=True, text=True, timeout=60)
             if result.returncode == 0:
                 print("✅ Master JSON file fixed successfully")

@@ -89,11 +89,7 @@ def fix_json_file(input_file, output_file=None):
         return False
     
     if output_file is None:
-        # Create backup first
-        backup_file = f"{input_file}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        os.rename(input_file, backup_file)
         output_file = input_file
-        safe_print(f"💾 Created backup: {backup_file}")
     
     safe_print(f"🔧 Reading {input_file}...")
     

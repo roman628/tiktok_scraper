@@ -4,7 +4,7 @@
 [tiktok]
 # MS Token for TikTok API access
 # Update this with a valid token before running tests
-ms_token = "Qf1A6tHLCX0gkXdfj0XVZG1yrhl0VuO4dob5j_YB7aHsqHcyIJjJlo3NlTl6Tfl0AV0yNZI2ElykWp6KhIIAoiLTGBipOHv2dEokAKeMbPCI-ufPyUMWZpY10Sme4ibS9LJcVpqwU5jqs7czavmScoo="
+ms_token = "YOUR_MS_TOKEN_HERE"
 
 [test]
 # Number of URLs to test
