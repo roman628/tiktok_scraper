@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {
+      width: 350px;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0;
+    }
+    
+    .header {
+      text-align: center;
+      margin-bottom: 16px;
+    }
+    
+    .title {
+      font-size: 18px;
+      font-weight: 600;
+      color: #333;
+      margin: 0;
+    }
+    
+    .subtitle {
+      font-size: 12px;
+      color: #666;
+      margin: 4px 0 0 0;
+    }
+    
+    .status {
+      padding: 12px;
+      border-radius: 6px;
+      margin-bottom: 12px;
+      font-size: 14px;
+    }
+    
+    .status.success {
+      background: #e8f5e8;
+      color: #2d5a2d;
+      border: 1px solid #c3e6c3;
+    }
+    
+    .status.error {
+      background: #fde8e8;
+      color: #721c24;
+      border: 1px solid #f5c6cb;
+    }
+    
+    .status.info {
+      background: #e3f2fd;
+      color: #0d47a1;
+      border: 1px solid #bbdefb;
+    }
+    
+    .current-url {
+      font-size: 12px;
+      color: #666;
+      word-break: break-all;
+      background: #f5f5f5;
+      padding: 8px;
+      border-radius: 4px;
+      margin-top: 8px;
+    }
+    
+    .button {
+      width: 100%;
+      padding: 10px;
+      background: #ff0050;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    
+    .button:hover {
+      background: #e6004a;
+    }
+    
+    .button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    
+    .settings-section {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid #e0e0e0;
+    }
+    
+    .settings-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      padding: 8px;
+      background: #f5f5f5;
+      border-radius: 4px;
+      margin-bottom: 8px;
+    }
+    
+    .settings-toggle:hover {
+      background: #ebebeb;
+    }
+    
+    .settings-content {
+      display: none;
+      margin-top: 8px;
+    }
+    
+    .settings-content.show {
+      display: block;
+    }
+    
+    .input-group {
+      margin-bottom: 12px;
+    }
+    
+    .input-label {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 4px;
+      display: block;
+    }
+    
+    .input-field {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+    
+    .input-field:focus {
+      outline: none;
+      border-color: #ff0050;
+    }
+    
+    .button-group {
+      display: flex;
+      gap: 8px;
+    }
+    
+    .button-secondary {
+      background: #666;
+    }
+    
+    .button-secondary:hover {
+      background: #555;
+    }
+    
+    .server-status {
+      font-size: 11px;
+      margin-top: 4px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: #f0f0f0;
+    }
+    
+    .server-status.connected {
+      background: #e8f5e8;
+      color: #2d5a2d;
+    }
+    
+    .server-status.disconnected {
+      background: #fde8e8;
+      color: #721c24;
+    }
+    
+    .toggle-icon {
+      transition: transform 0.2s;
+    }
+    
+    .toggle-icon.expanded {
+      transform: rotate(90deg);
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1 class="title">TikTok URL Collector</h1>
+    <p class="subtitle">Automatically captures TikTok video URLs</p>
+  </div>
+  
+  <div id="status" class="status info">
+    Checking current page...
+  </div>
+  
+  <div id="currentUrl" class="current-url" style="display: none;"></div>
+  
+  <button id="manualCapture" class="button" disabled>
+    Capture Current URL
+  </button>
+  
+  <div class="settings-section">
+    <div class="settings-toggle" id="settingsToggle">
+      <span>⚙️ Server Settings</span>
+      <span class="toggle-icon" id="toggleIcon">▶</span>
+    </div>
+    
+    <div class="settings-content" id="settingsContent">
+      <div class="input-group">
+        <label class="input-label" for="serverUrl">Server URL</label>
+        <input type="text" id="serverUrl" class="input-field" placeholder="http://localhost" />
+      </div>
+      
+      <div class="input-group">
+        <label class="input-label" for="serverPort">Server Port</label>
+        <input type="text" id="serverPort" class="input-field" placeholder="8765" />
+      </div>
+      
+      <div class="server-status" id="serverStatus">
+        Current: <span id="currentServer"></span>
+      </div>
+      
+      <div class="button-group">
+        <button id="saveSettings" class="button button-secondary">
+          Save Settings
+        </button>
+        <button id="testConnection" class="button">
+          Test Connection
+        </button>
+      </div>
+    </div>
+  </div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>
