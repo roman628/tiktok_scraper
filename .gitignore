@@ -21,3 +21,4 @@ tests/test_output.json
 tests/test_report.json
 tests/*.log
 tests/test_config.toml
+config.toml

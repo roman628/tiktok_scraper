@@ -16,6 +16,11 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
@@ -385,6 +390,88 @@ def auto_clean_master_json(master_file: str):
     except Exception as e:
         print(f"Error cleaning master file: {e}")
 
+def load_config(config_path: str = "config.toml") -> Dict[str, Any]:
+    """Load configuration from TOML file."""
+    config = {}
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'rb') as f:
+                config = tomllib.load(f)
+            print(f"✓ Loaded configuration from {config_path}")
+        except Exception as e:
+            print(f"Warning: Could not load {config_path}: {e}")
+    return config
+
+def merge_config_with_args(args, config: Dict[str, Any]):
+    """Merge TOML config with command-line arguments (CLI takes precedence)."""
+    if not config:
+        return args
+    
+    # Map config sections to argument names
+    config_mappings = {
+        # TikTok settings
+        ('tiktok', 'ms_token'): 'ms_token',
+        
+        # Input settings
+        ('input', 'default_urls_file'): 'from_file',
+        ('input', 'limit'): 'limit',
+        
+        # Download settings
+        ('download', 'output_dir'): 'output',
+        ('download', 'quality'): 'quality',
+        ('download', 'audio_only'): 'mp3',
+        ('download', 'use_whisper'): 'whisper',
+        ('download', 'force_cpu'): 'force_cpu',
+        
+        # Comments settings
+        ('comments', 'max_comments'): 'max_comments',
+        
+        # Processing settings
+        ('processing', 'batch_size'): 'batch_size',
+        ('processing', 'delay'): 'delay',
+        ('processing', 'workers'): 'workers',
+        
+        # Output settings
+        ('output', 'json_output'): 'json_output',
+        
+        # Resume settings
+        ('resume', 'skip_duplicates'): None,  # Inverse of force_redownload
+        ('resume', 'force_redownload'): 'force_redownload',
+        ('resume', 'clean_start'): 'clean_progress',
+        
+        # Network settings
+        ('network', 'proxy'): 'proxy',
+    }
+    
+    # Apply config values where CLI args are not set
+    for (section, key), arg_name in config_mappings.items():
+        if arg_name is None:
+            continue
+            
+        if section in config and key in config[section]:
+            config_value = config[section][key]
+            current_value = getattr(args, arg_name, None)
+            
+            # Only apply config value if CLI arg was not explicitly set
+            if arg_name == 'from_file':
+                # Special handling for from_file - only use if no URL input provided
+                if not args.url and not args.from_file:
+                    setattr(args, arg_name, config_value)
+            elif arg_name in ['mp3', 'whisper', 'force_cpu', 'force_redownload', 'clean_progress']:
+                # Boolean flags - only override if False (not set via CLI)
+                if not current_value:
+                    setattr(args, arg_name, config_value)
+            elif current_value is None:
+                # Regular arguments - apply if None or still at default
+                setattr(args, arg_name, config_value)
+    
+    # Handle skip_duplicates (inverse of force_redownload)
+    if 'resume' in config and 'skip_duplicates' in config['resume']:
+        if not args.force_redownload:  # Only apply if not explicitly set
+            args.force_redownload = not config['resume']['skip_duplicates']
+    
+    return args
+
 async def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(description="Robust TikTok Data Collector")
@@ -422,7 +509,13 @@ async def main():
     
     args = parser.parse_args()
     
-    # Default to urls.txt if no input specified
+    # Load configuration from config.toml
+    config = load_config()
+    
+    # Merge config with command-line arguments (CLI takes precedence)
+    args = merge_config_with_args(args, config)
+    
+    # Default to urls.txt if no input specified (and not in config)
     if not args.url and not args.from_file:
         if os.path.exists('urls.txt'):
             print("Using default: --from-file urls.txt --mp3 --whisper")
@@ -430,7 +523,7 @@ async def main():
             args.mp3 = True
             args.whisper = True
         else:
-            print("Error: Provide --url or --from-file")
+            print("Error: Provide --url or --from-file (or set default_urls_file in config.toml)")
             sys.exit(1)
     
     # Initialize processor

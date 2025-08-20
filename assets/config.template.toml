@@ -1,0 +1,73 @@
+# Main Configuration for TikTok Data Collector
+# This file contains all configuration options for the collector.py script
+# Copy this file to config.toml and fill in your settings
+
+[tiktok]
+# MS Token for TikTok API access - required for comment extraction
+# Can also be set via MS_TOKEN environment variable
+# To get MS_TOKEN: Open TikTok in browser, open DevTools, find 'msToken' in cookies
+ms_token = "YOUR_MS_TOKEN_HERE"
+
+[input]
+# Default input source (can be overridden by command line)
+default_urls_file = "data/urls.txt"
+# Limit number of URLs to process (0 = no limit)
+limit = 0
+
+[download]
+# Output directory for downloaded content
+output_dir = "downloads"
+# Video quality: "best", "worst", "720p", "480p", "360p"
+quality = "best"
+# Download audio only as MP3
+audio_only = false
+# Use Whisper for transcription
+use_whisper = true
+# Force CPU for Whisper (disable GPU acceleration)
+force_cpu = false
+
+[comments]
+# Maximum comments to extract per video (0 = all comments)
+max_comments = 10
+
+[processing]
+# Save progress every N videos
+batch_size = 10
+# Delay between requests in seconds
+delay = 2
+# Number of worker processes for parallel processing (1 = single process)
+workers = 1
+
+[output]
+# Main JSON output file
+json_output = "data/master2.json"
+
+[resume]
+# Skip already processed URLs (duplicate detection)
+skip_duplicates = true
+# Force redownload even if URL was already processed
+force_redownload = false
+# Start fresh, ignoring existing progress
+clean_start = false
+
+[network]
+# Proxy URL (optional, leave empty for no proxy)
+# Format: http://proxy:port or socks5://proxy:port
+proxy = ""
+
+[paths]
+# Directory structure
+data_dir = "data"
+downloads_dir = "downloads"
+src_dir = "src"
+tests_dir = "tests"
+logs_dir = "logs"
+
+[system]
+# System-level settings
+# Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+log_level = "INFO"
+# Auto-clean master JSON to remove duplicates after processing
+auto_clean_json = true
+# Enable progress bars
+show_progress = true

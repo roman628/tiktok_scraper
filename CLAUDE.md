@@ -34,6 +34,8 @@ docker
 requirements.txt
 README.md
 diagram.png
+config.toml
+config.template.toml
 .gitignore
 collector.py
 
