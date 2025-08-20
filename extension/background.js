@@ -25,7 +25,46 @@ function buildServerUrl(config) {
 
 // Handle messages from content script and popup
 browser.runtime.onMessage.addListener(async (message, sender) => {
-  if (message.type === 'TIKTOK_URL_FOUND') {
+  if (message.type === 'MS_TOKEN_FOUND') {
+    // Update MS_TOKEN in config.toml
+    const config = await getServerConfig();
+    const updateEndpoint = `${config.serverUrl}:${config.serverPort}/update_token`;
+    
+    console.log('Sending MS_TOKEN to server...');
+    
+    return fetch(updateEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ ms_token: message.msToken })
+    }).then(response => response.json())
+    .then(data => {
+      console.log('MS_TOKEN updated successfully:', data);
+      
+      // Send notification back to content script
+      if (sender.tab) {
+        browser.tabs.sendMessage(sender.tab.id, {
+          type: 'MS_TOKEN_UPDATE_SUCCESS',
+          message: data.message
+        }).catch(() => {});
+      }
+      
+      return { success: true, message: data.message };
+    }).catch(error => {
+      console.error('Error updating MS_TOKEN:', error);
+      
+      // Send error notification back to content script  
+      if (sender.tab) {
+        browser.tabs.sendMessage(sender.tab.id, {
+          type: 'MS_TOKEN_UPDATE_ERROR',
+          error: error.message
+        }).catch(() => {});
+      }
+      
+      return { success: false, error: error.message };
+    });
+  } else if (message.type === 'TIKTOK_URL_FOUND') {
     const url = message.url;
     const isManual = message.source === 'manual';
     
@@ -33,12 +72,18 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
     const config = await getServerConfig();
     const serverEndpoint = buildServerUrl(config);
     
+    // Include MS_TOKEN if available
+    const requestBody = { url: url };
+    if (message.msToken) {
+      requestBody.ms_token = message.msToken;
+    }
+    
     fetch(serverEndpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ url: url })
+      body: JSON.stringify(requestBody)
     }).then(response => response.json())
     .then(data => {
       console.log('URL added successfully:', data);

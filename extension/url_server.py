@@ -6,6 +6,7 @@ import json
 import urllib.parse
 from pathlib import Path
 import os
+import toml
 
 class URLHandler(http.server.BaseHTTPRequestHandler):
     def do_OPTIONS(self):
@@ -16,7 +17,28 @@ class URLHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
-        if self.path == '/add_url':
+        if self.path == '/update_token':
+            try:
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data.decode('utf-8'))
+                
+                ms_token = data.get('ms_token')
+                if ms_token:
+                    result = self.update_ms_token(ms_token)
+                    
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    
+                    response = json.dumps(result)
+                    self.wfile.write(response.encode('utf-8'))
+                else:
+                    self.send_error(400, "No MS_TOKEN provided")
+            except Exception as e:
+                self.send_error(500, str(e))
+        elif self.path == '/add_url':
             try:
                 content_length = int(self.headers['Content-Length'])
                 post_data = self.rfile.read(content_length)
@@ -34,6 +56,12 @@ class URLHandler(http.server.BaseHTTPRequestHandler):
                     return
                 
                 url = data.get('url')
+                ms_token = data.get('ms_token')
+                
+                # If MS_TOKEN is provided with URL, update it
+                if ms_token:
+                    self.update_ms_token(ms_token)
+                
                 if url:
                     result = self.add_url_to_file(url)
                     
@@ -51,6 +79,37 @@ class URLHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def update_ms_token(self, ms_token):
+        try:
+            # Get the project root directory (parent of extension directory)
+            script_dir = Path(__file__).parent.parent
+            config_file = script_dir / 'config.toml'
+            template_file = script_dir / 'assets' / 'config.template.toml'
+            
+            # Read existing config
+            if config_file.exists():
+                with open(config_file, 'r') as f:
+                    config = toml.load(f)
+            else:
+                # Try to load from template, otherwise use minimal structure
+                if template_file.exists():
+                    with open(template_file, 'r') as f:
+                        config = toml.load(f)
+                else:
+                    # Fallback to minimal structure if template not found
+                    config = {'tiktok': {}}
+            
+            # Update MS_TOKEN
+            config['tiktok']['ms_token'] = ms_token
+            
+            # Write updated config
+            with open(config_file, 'w') as f:
+                toml.dump(config, f)
+            
+            return {"success": True, "message": f"MS_TOKEN updated in config.toml"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
     def add_url_to_file(self, url):
         try:
             # Get the project root directory (parent of extension directory)
@@ -91,9 +150,19 @@ if __name__ == "__main__":
     print(f"URLs will be saved to: data/urls.txt")
     print("Press Ctrl+C to stop")
     
-    with socketserver.TCPServer(("", PORT), URLHandler) as httpd:
-        try:
+    # Allow port reuse
+    socketserver.TCPServer.allow_reuse_address = True
+    
+    try:
+        with socketserver.TCPServer(("", PORT), URLHandler) as httpd:
             httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("\nServer stopped")
-            httpd.shutdown()
+    except OSError as e:
+        if "Address already in use" in str(e):
+            print(f"\nError: Port {PORT} is already in use.")
+            print("Please stop the other process or use a different port.")
+            print("\nTo find and kill the process using this port, run:")
+            print(f"  lsof -ti:{PORT} | xargs kill -9")
+        else:
+            print(f"\nError starting server: {e}")
+    except KeyboardInterrupt:
+        print("\nServer stopped")

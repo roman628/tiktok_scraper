@@ -91,6 +91,45 @@ async function testConnection() {
   }
 }
 
+// Function to check MS_TOKEN status
+async function checkMSTokenStatus() {
+  const tokenStatusDiv = document.getElementById('tokenStatus');
+  const tokenIndicator = document.getElementById('tokenIndicator');
+  const tokenMessage = document.getElementById('tokenMessage');
+  
+  // Check if we're on TikTok
+  const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+  const currentTab = tabs[0];
+  
+  if (currentTab.url && currentTab.url.includes('tiktok.com')) {
+    tokenStatusDiv.style.display = 'block';
+    
+    // Request MS_TOKEN from content script
+    try {
+      const response = await browser.tabs.sendMessage(currentTab.id, { type: 'GET_MS_TOKEN' });
+      if (response && response.msToken) {
+        tokenIndicator.textContent = 'FOUND';
+        tokenIndicator.style.background = '#2ed573';
+        tokenIndicator.style.color = 'white';
+        tokenMessage.textContent = '✓ MS_TOKEN detected';
+      } else {
+        tokenIndicator.textContent = 'NOT FOUND';
+        tokenIndicator.style.background = '#ff4757';
+        tokenIndicator.style.color = 'white';
+        tokenMessage.textContent = '⚠️ MS_TOKEN not found';
+      }
+    } catch (e) {
+      // Content script might not be injected yet
+      tokenIndicator.textContent = 'CHECKING';
+      tokenIndicator.style.background = '#ffa502';
+      tokenIndicator.style.color = 'white';
+      tokenMessage.textContent = 'Checking for MS_TOKEN...';
+    }
+  } else {
+    tokenStatusDiv.style.display = 'none';
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const manualButton = document.getElementById('manualCapture');
   const settingsToggle = document.getElementById('settingsToggle');
@@ -143,6 +182,8 @@ document.addEventListener('DOMContentLoaded', () => {
         updateStatus('TikTok page detected, but not a video', 'info');
         manualButton.disabled = true;
       }
+      // Check MS_TOKEN status when on TikTok
+      checkMSTokenStatus();
     } else {
       updateStatus('Not on TikTok', 'error');
       manualButton.disabled = true;
