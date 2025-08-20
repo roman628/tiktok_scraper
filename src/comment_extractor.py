@@ -67,10 +67,9 @@ class CommentExtractor:
             await self.api.create_sessions(
                 ms_tokens=[self.ms_token],
                 num_sessions=1,
-                sleep_after=1,  # Reduced from 3 to match legacy
-                headless=True,
-                # Critical: suppress resources to avoid bot detection
-                suppress_resource_load_types=["image", "media", "font", "stylesheet"]
+                sleep_after=1,
+                headless=True,  # Run with visible browser to avoid bot detection
+                browser="webkit"  # Use webkit as suggested by TikTok error
             )
             self.session = self.api.sessions[0]
     
@@ -123,8 +122,8 @@ class CommentExtractor:
                 comments.append(comment)
                 comment_count += 1
                 
-                # Rate limiting
-                await asyncio.sleep(0.1)
+                # Rate limiting - increased to avoid bot detection
+                await asyncio.sleep(1.0)
             
             # Clean up session after extraction to avoid accumulation
             await self.cleanup()
@@ -210,18 +209,57 @@ class CommentExtractor:
         """Clean up API resources."""
         if self.api:
             try:
+                # Properly close all browser contexts and sessions
+                if hasattr(self.api, 'browser'):
+                    await self.api.browser.close()
                 await self.api.close_sessions()
-            except:
-                pass
-            self.api = None
-            self.session = None
+            except Exception as e:
+                print(f"Warning: Error during cleanup: {e}")
+            finally:
+                self.api = None
+                self.session = None
     
     def cleanup_sync(self):
-        """Synchronous cleanup wrapper."""
+        """Synchronous cleanup with proper timeout and fallback."""
+        if not self.api:
+            return
+        
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.cleanup())
-            loop.close()
-        except:
-            pass
+            # Try async cleanup with strict timeout
+            loop = None
+            try:
+                # Create new event loop for cleanup
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                # Run cleanup with timeout
+                future = loop.create_task(self.cleanup())
+                loop.run_until_complete(asyncio.wait_for(future, timeout=3.0))
+                
+            except asyncio.TimeoutError:
+                print("Warning: Async cleanup timed out, forcing browser kill")
+                self._force_cleanup()
+            except Exception as e:
+                print(f"Warning: Async cleanup failed: {e}, forcing browser kill")
+                self._force_cleanup()
+            finally:
+                if loop and not loop.is_closed():
+                    try:
+                        loop.close()
+                    except:
+                        pass
+                    
+        except Exception as e:
+            print(f"Warning: Critical error in cleanup: {e}")
+            self._force_cleanup()
+    
+    def _force_cleanup(self):
+        """Force cleanup by killing browser processes."""
+        try:
+            from src.resource_manager import ResourceManager
+            ResourceManager.kill_browser_processes()
+        except Exception as e:
+            print(f"Warning: Failed to kill browser processes: {e}")
+        finally:
+            self.api = None
+            self.session = None

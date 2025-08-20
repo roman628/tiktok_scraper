@@ -38,7 +38,7 @@ class VideoExtractor:
     
     def download_single_video(self, url: str, audio_only: bool = False, 
                             use_whisper: bool = False, whisper_model: Any = None,
-                            whisper_device: str = "CPU") -> Dict[str, Any]:
+                            whisper_device: str = "CPU", shutdown_event=None) -> Dict[str, Any]:
         """Download a single TikTok video with metadata.
         
         Args:
@@ -47,14 +47,24 @@ class VideoExtractor:
             use_whisper: Enable transcription
             whisper_model: Pre-loaded Whisper model
             whisper_device: Device for Whisper
+            shutdown_event: Event to check for shutdown requests
             
         Returns:
             Dictionary with success status and metadata
         """
-        if self.shutdown_requested:
+        # Check both shutdown mechanisms
+        if self.shutdown_requested or (shutdown_event and shutdown_event.is_set()):
             return {'success': False, 'error': 'Shutdown requested', 'url': url}
         
+        # Store shutdown event for use in download hooks
+        if shutdown_event:
+            self.shutdown_event = shutdown_event
+        
         try:
+            # Check shutdown before metadata extraction
+            if shutdown_event and shutdown_event.is_set():
+                return {'success': False, 'error': 'Shutdown during metadata', 'url': url}
+                
             # Extract metadata first
             metadata = self._extract_metadata(url)
             if not metadata:
@@ -64,16 +74,24 @@ class VideoExtractor:
             if isinstance(metadata, dict) and metadata.get('deleted'):
                 return {'success': False, 'error': metadata.get('error'), 'deleted': True, 'url': url}
             
+            # Check shutdown before download
+            if shutdown_event and shutdown_event.is_set():
+                return {'success': False, 'error': 'Shutdown before download', 'url': url}
+            
             # Create download folder
             folder_name = self._sanitize_filename(metadata['title'])[:100]
             video_folder = Path(self.output_dir) / folder_name
             video_folder.mkdir(parents=True, exist_ok=True)
             
-            # Download video/audio
+            # Download video/audio with shutdown event
             download_path = self._download_content(url, video_folder, folder_name, audio_only, use_whisper)
             if not download_path:
                 return {'success': False, 'error': 'Download failed', 'url': url}
             
+            # Check shutdown before transcription
+            if shutdown_event and shutdown_event.is_set():
+                return {'success': False, 'error': 'Shutdown before transcription', 'url': url}
+                
             # Transcribe if requested
             if use_whisper:
                 transcript = self._transcribe_video(download_path, whisper_model, whisper_device)
@@ -166,7 +184,13 @@ class VideoExtractor:
     
     def _download_content(self, url: str, video_folder: Path, folder_name: str, 
                          audio_only: bool, use_whisper: bool) -> Optional[Path]:
-        """Download video or audio content."""
+        """Download video or audio content with shutdown checking."""
+        
+        # Define shutdown-aware progress hook
+        def progress_hook(d):
+            if self.shutdown_event and self.shutdown_event.is_set():
+                raise yt_dlp.utils.DownloadError("Shutdown requested during download")
+        
         ydl_opts = {
             'outtmpl': str(video_folder / f"{folder_name}.%(ext)s"),
             'noplaylist': True,
@@ -178,7 +202,8 @@ class VideoExtractor:
             'no_warnings': True,
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
+            },
+            'progress_hooks': [progress_hook] if self.shutdown_event else []
         }
         
         if self.proxy:

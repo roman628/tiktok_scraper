@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import time
 import signal
+import queue
 import multiprocessing as mp
 from pathlib import Path
 from datetime import datetime
@@ -66,11 +67,27 @@ class RobustTikTokProcessor:
     
     def cleanup(self):
         """Cleanup resources on shutdown."""
+        import concurrent.futures
         self.shutdown_requested = True
         self.save_progress()
-        if self.comment_extractor:
-            self.comment_extractor.cleanup_sync()
-        self.video_extractor.cleanup()
+        
+        # Cleanup with timeout
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = []
+            
+            # Schedule cleanup tasks
+            if self.comment_extractor:
+                futures.append(executor.submit(self.comment_extractor.cleanup_sync))
+            futures.append(executor.submit(self.video_extractor.cleanup))
+            
+            # Wait for cleanup with timeout
+            done, not_done = concurrent.futures.wait(futures, timeout=5)
+            
+            if not_done:
+                print("Warning: Some cleanup tasks timed out")
+                # Force kill browser processes if cleanup hangs
+                self.resource_manager.kill_browser_processes()
+        
         print("Cleanup completed")
     
     def get_ms_token(self) -> bool:
@@ -325,9 +342,15 @@ class MultiprocessCoordinator:
         processed_count = 0
         
         try:
-            while processed_count < len(urls):
+            while processed_count < len(urls) and not self.shutdown_event.is_set():
                 try:
-                    result = self.result_queue.get(timeout=1)
+                    result = self.result_queue.get(timeout=0.5)  # Shorter timeout for responsive shutdown
+                    
+                    # Check for sentinel value indicating worker shutdown
+                    if result is None:
+                        print("Received worker shutdown signal")
+                        continue
+                    
                     if result and result.get('success'):
                         data_manager.append_to_master(result['data'])
                         self.shared_state['processed'] += 1
@@ -344,12 +367,28 @@ class MultiprocessCoordinator:
                     if processed_count % 10 == 0:
                         print(f"Progress: {processed_count}/{len(urls)} URLs processed")
                         
-                except:
+                except queue.Empty:
+                    # Check shutdown status during timeout
+                    if self.shutdown_event.is_set():
+                        print("Shutdown requested during queue processing")
+                        break
+                    continue
+                except Exception as e:
+                    print(f"Error processing result: {e}")
+                    if self.shutdown_event.is_set():
+                        break
                     continue
                     
         except KeyboardInterrupt:
-            print("Shutting down workers...")
+            print("\nShutting down workers gracefully...")
             self.shutdown_event.set()
+            
+            # Send poison pills to wake up any blocking queue operations
+            for _ in range(self.num_workers):
+                try:
+                    self.url_queue.put(None, timeout=0.1)
+                except:
+                    pass
         
         # Wait for workers to finish
         for worker in workers:
@@ -410,11 +449,15 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
     """Worker process for parallel data collection."""
     print(f"Worker {worker_id} started")
     
+    # Import shutdown handler for worker
+    from src.shutdown_manager import WorkerShutdownHandler
+    worker_handler = WorkerShutdownHandler(worker_id, shutdown_event)
+    
     # Set up signal handler for this worker
     def worker_signal_handler(signum, frame):
         print(f"Worker {worker_id} received shutdown signal")
         shutdown_event.set()
-        sys.exit(0)
+        # Don't exit immediately - let the worker loop handle cleanup
     
     signal.signal(signal.SIGINT, worker_signal_handler)
     signal.signal(signal.SIGTERM, worker_signal_handler)
@@ -441,72 +484,97 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
             # Fallback to regular loading (for backwards compatibility)
             whisper_model, _ = load_whisper_model(force_cpu=args.force_cpu)
     
-    # Process URLs
-    while not shutdown_event.is_set():
-        try:
-            url = url_queue.get(timeout=1)
-        except:
-            # Check shutdown again after timeout
+    # Process URLs with shutdown checking
+    try:
+        while not shutdown_event.is_set():
+            try:
+                url = url_queue.get(timeout=0.5)  # Shorter timeout for responsiveness
+                if url is None:  # Sentinel value for shutdown
+                    break
+            except queue.Empty:
+                continue
+            except Exception:
+                if shutdown_event.is_set():
+                    break
+                continue
+            
+            # Check shutdown before starting work
+            if shutdown_event.is_set():
+                # Put URL back for another worker if possible
+                try:
+                    url_queue.put(url, timeout=0.1)
+                except:
+                    pass
+                break
+            
+            # Process URL with shutdown event passed
+            result = video_extractor.download_single_video(
+                url,
+                audio_only=download_kwargs.get('audio_only', False),
+                use_whisper=args.whisper,
+                whisper_model=whisper_model,
+                whisper_device='CPU' if args.force_cpu else 'auto',
+                shutdown_event=shutdown_event  # Pass shutdown event
+            )
+        
+            # Check shutdown after download
             if shutdown_event.is_set():
                 break
-            continue
-        
-        if url is None:
-            break
-        
-        # Check shutdown before processing
-        if shutdown_event.is_set():
-            break
-        
-        # Process URL
-        result = video_extractor.download_single_video(
-            url,
-            audio_only=download_kwargs.get('audio_only', False),
-            use_whisper=args.whisper,
-            whisper_model=whisper_model,
-            whisper_device='CPU' if args.force_cpu else 'auto'
-        )
-        
-        if result['success']:
-            # Extract comments if MS_TOKEN available
-            comments = []
-            if ms_token:
-                comment_extractor = None
-                try:
-                    comment_extractor = CommentExtractor(ms_token=ms_token, max_comments=args.max_comments)
-                    comments = [c.to_dict() for c in comment_extractor.extract_comments_sync(url)]
-                except Exception as e:
-                    print(f"Error extracting comments: {e}")
-                finally:
-                    # Ensure cleanup happens
-                    if comment_extractor:
-                        comment_extractor.cleanup_sync()
-            
-            # Prepare data
-            video_data = {
-                'url': url,
-                'video_id': result['metadata'].get('video_id', ''),
-                'transcript': result['metadata'].get('whisper_transcription', ''),
-                'metadata': result['metadata'],
-                'comments': comments
-            }
-            
-            result_queue.put({'success': True, 'data': video_data})
-        else:
-            # Pass along deleted flag if present
-            result_queue.put({
-                'success': False, 
-                'error': result.get('error'),
-                'deleted': result.get('deleted', False),
-                'url': url
-            })
+                
+            if result['success']:
+                # Extract comments if MS_TOKEN available
+                comments = []
+                if ms_token and not shutdown_event.is_set():
+                    comment_extractor = None
+                    try:
+                        comment_extractor = CommentExtractor(ms_token=ms_token, max_comments=args.max_comments)
+                        comments = [c.to_dict() for c in comment_extractor.extract_comments_sync(url)]
+                    except Exception as e:
+                        print(f"Error extracting comments: {e}")
+                    finally:
+                        # Ensure cleanup happens
+                        if comment_extractor:
+                            comment_extractor.cleanup_sync()
+                
+                # Prepare data
+                video_data = {
+                    'url': url,
+                    'video_id': result['metadata'].get('video_id', ''),
+                    'transcript': result['metadata'].get('whisper_transcription', ''),
+                    'metadata': result['metadata'],
+                    'comments': comments
+                }
+                
+                if not shutdown_event.is_set():
+                    result_queue.put({'success': True, 'data': video_data})
+            else:
+                # Pass along deleted flag if present
+                if not shutdown_event.is_set():
+                    result_queue.put({
+                        'success': False, 
+                        'error': result.get('error'),
+                        'deleted': result.get('deleted', False),
+                        'url': url
+                    })
     
-    # Cleanup before exit
-    video_extractor.cleanup()
-    if whisper_model:
-        del whisper_model
-    
-    print(f"Worker {worker_id} finished")
+    except Exception as e:
+        print(f"Worker {worker_id} error: {e}")
+    finally:
+        # Cleanup with timeout protection
+        try:
+            video_extractor.cleanup()
+            if whisper_model:
+                del whisper_model
+        except Exception as e:
+            print(f"Worker {worker_id} cleanup error: {e}")
+        
+        # Send sentinel to indicate this worker is done
+        try:
+            result_queue.put(None, timeout=0.1)
+        except:
+            pass
+        
+        print(f"Worker {worker_id} finished")
 
 def load_urls_from_file(file_path: str) -> List[str]:
     """Load URLs from file."""
@@ -657,7 +725,12 @@ def merge_config_with_args(args, config: Dict[str, Any], cli_provided: set):
     return args
 
 async def main():
-    """Main entry point."""
+    """Main entry point with proper shutdown integration."""
+    from src.shutdown_manager import shutdown_manager
+    
+    # Initialize shutdown manager first
+    shutdown_manager.register_signal_handlers(force_exit_on_double=True)
+    
     # Track CLI arguments BEFORE parsing
     cli_provided = get_cli_provided_args()
     print(f"CLI provided arguments: {cli_provided}")
@@ -735,8 +808,9 @@ async def main():
                 print("Error: Provide --url or --from-file (or set default_urls_file in config.toml)")
                 sys.exit(1)
     
-    # Initialize processor
+    # Initialize processor with shutdown manager
     processor = RobustTikTokProcessor(args)
+    shutdown_manager.register_cleanup_handler(processor.cleanup)
     
     # Load existing progress
     if not args.force_redownload:
@@ -793,7 +867,7 @@ async def main():
     
     print(f"Processing {len(urls)} of {original_count} URLs")
     
-    # Process URLs
+    # Process URLs with shutdown checking
     try:
         if args.workers <= 1:
             # Single process mode
@@ -805,6 +879,7 @@ async def main():
                 sys.exit(1)
             
             coordinator = MultiprocessCoordinator(args, processor.ms_token)
+            coordinator.shutdown_event = shutdown_manager.shutdown_event
             
             # Remove model from kwargs for multiprocessing
             mp_kwargs = download_kwargs.copy()
@@ -819,9 +894,19 @@ async def main():
         auto_clean_master_json(processor.master_file)
         
     except KeyboardInterrupt:
-        print("\nShutdown initiated...")
-        processor.cleanup()
+        # This should not be reached due to signal handlers, but keep as fallback
+        print("\nUnexpected KeyboardInterrupt in main()")
+        shutdown_manager.shutdown_event.set()
+    finally:
+        # Ensure cleanup runs if not already initiated
+        if not shutdown_manager.shutdown_initiated:
+            processor.cleanup()
         sys.exit(0)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # Handle the case where asyncio.run itself is interrupted
+        print("\nForced shutdown")
+        sys.exit(1)
