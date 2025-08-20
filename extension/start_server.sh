@@ -37,6 +37,9 @@ if [ ! -w "../data" ]; then
     exit 1
 fi
 
-echo -e "${GREEN}Server starting...${NC}"
-# Run the server (no venv needed as it only uses standard library)
-python3 url_server.py
+echo -e "You can override the default host and port with flags:"
+echo -e "  ${YELLOW}./start_server.sh --host YOUR_IP --port YOUR_PORT${NC}"
+echo ""
+
+# Run the server, passing all script arguments to the python script
+python3 url_server.py "$@"

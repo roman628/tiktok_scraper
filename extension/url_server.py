@@ -177,21 +177,27 @@ class URLHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 if __name__ == "__main__":
-    import socket
+    import argparse
 
-    PORT = 8765
-    
-    # Get local IP address
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        HOST = s.getsockname()[0]
-        s.close()
-    except Exception:
-        HOST = "localhost"
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description="Run a simple HTTP server to collect TikTok URLs.")
+    parser.add_argument('--host', type=str, default='0.0.0.0', 
+                        help='Host address to bind to. Defaults to 0.0.0.0.')
+    parser.add_argument('--port', type=int, default=8765, 
+                        help='Port to listen on. Defaults to 8765.')
+    args = parser.parse_args()
+
+    HOST = args.host
+    PORT = args.port
 
     print(f"Starting TikTok URL collector server...")
-    print(f"Listening on: http://{HOST}:{PORT} (and http://localhost:{PORT})")
+    # Display Tailscale IP if available, otherwise show host
+    if HOST == '0.0.0.0':
+        print(f"Listening on all interfaces. Port: {PORT}")
+        print(f"Connect from other devices using the machine's local or Tailscale IP.")
+    else:
+        print(f"Listening on: http://{HOST}:{PORT}")
+
     print(f"URLs will be saved to: data/urls.txt")
     print("Press Ctrl+C to stop")
     
@@ -199,15 +205,17 @@ if __name__ == "__main__":
     socketserver.TCPServer.allow_reuse_address = True
     
     try:
-        with socketserver.TCPServer(("", PORT), URLHandler) as httpd:
+        with socketserver.TCPServer((HOST, PORT), URLHandler) as httpd:
             httpd.serve_forever()
     except OSError as e:
         if "Address already in use" in str(e):
-            print(f"\nError: Port {PORT} is already in use.")
-            print("Please stop the other process or use a different port.")
-            print("\nTo find and kill the process using this port, run:")
-            print(f"  lsof -ti:{PORT} | xargs kill -9")
+            print(f"\nError: Port {PORT} or Host {HOST} is already in use.")
+            print("Please stop the other process or use a different port/host.")
+        elif "Cannot assign requested address" in str(e):
+            print(f"\nError: Cannot assign requested address '{HOST}'.")
+            print("Please check if the IP address is correct and available on this machine.")
         else:
             print(f"\nError starting server: {e}")
     except KeyboardInterrupt:
         print("\nServer stopped")
+
