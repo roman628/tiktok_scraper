@@ -177,8 +177,21 @@ class URLHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 if __name__ == "__main__":
+    import socket
+
     PORT = 8765
-    print(f"Starting TikTok URL collector server on port {PORT}")
+    
+    # Get local IP address
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        HOST = s.getsockname()[0]
+        s.close()
+    except Exception:
+        HOST = "localhost"
+
+    print(f"Starting TikTok URL collector server...")
+    print(f"Listening on: http://{HOST}:{PORT} (and http://localhost:{PORT})")
     print(f"URLs will be saved to: data/urls.txt")
     print("Press Ctrl+C to stop")
     

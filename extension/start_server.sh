@@ -37,9 +37,6 @@ if [ ! -w "../data" ]; then
     exit 1
 fi
 
-echo -e "${GREEN}Server starting on http://localhost:8765${NC}"
-echo "URLs will be saved to: data/urls.txt"
-echo ""
-
+echo -e "${GREEN}Server starting...${NC}"
 # Run the server (no venv needed as it only uses standard library)
 python3 url_server.py
