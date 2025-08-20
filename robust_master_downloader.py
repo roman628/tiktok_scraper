@@ -1239,7 +1239,7 @@ class WorkerProcessor:
         self.whisper_model = None
         self.whisper_device = "CPU"
         if args.whisper:
-            from scripts.collection.tiktok_scraper import load_whisper_model
+            from tiktok_scraper import load_whisper_model
             self.whisper_model, self.whisper_device = load_whisper_model(force_cpu=args.force_cpu)
             if self.whisper_model:
                 self.update_worker_status('ready', f'Whisper model loaded on {self.whisper_device}')
@@ -1386,7 +1386,7 @@ class WorkerProcessor:
                 self.update_worker_status('downloading', video_title)
                 
                 # Download video
-                from scripts.collection.tiktok_scraper import download_single_video as download_tiktok_video
+                from tiktok_scraper import download_single_video as download_tiktok_video
                 
                 # Update download_kwargs with worker-specific whisper model
                 worker_download_kwargs = download_kwargs.copy()
