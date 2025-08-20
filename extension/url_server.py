@@ -7,6 +7,8 @@ import urllib.parse
 from pathlib import Path
 import os
 import toml
+import urllib.request
+import urllib.error
 
 class URLHandler(http.server.BaseHTTPRequestHandler):
     def do_OPTIONS(self):
@@ -63,7 +65,14 @@ class URLHandler(http.server.BaseHTTPRequestHandler):
                     self.update_ms_token(ms_token)
                 
                 if url:
-                    result = self.add_url_to_file(url)
+                    # Validate URL first
+                    print(f"Validating URL: {url}")
+                    if self.validate_tiktok_url(url):
+                        print(f"✓ Valid URL: {url}")
+                        result = self.add_url_to_file(url)
+                    else:
+                        print(f"✗ Invalid URL: {url}")
+                        result = {"success": False, "message": "Invalid TikTok URL - video may not exist or be accessible"}
                     
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
@@ -79,6 +88,29 @@ class URLHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def validate_tiktok_url(self, url):
+        """Validate TikTok URL using oembed endpoint"""
+        try:
+            # Construct oembed URL
+            oembed_url = f"https://www.tiktok.com/oembed?url={urllib.parse.quote(url)}"
+            
+            # Make request to oembed endpoint
+            req = urllib.request.Request(oembed_url)
+            req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+            
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                # If we get valid JSON with title, the video exists
+                if data.get('title') or data.get('author_name'):
+                    return True
+            return False
+        except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, KeyError):
+            # Any error means the URL is invalid
+            return False
+        except Exception:
+            # For any other unexpected errors, assume invalid
+            return False
+    
     def update_ms_token(self, ms_token):
         try:
             # Get the project root directory (parent of extension directory)

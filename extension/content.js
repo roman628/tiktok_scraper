@@ -28,7 +28,16 @@ function extractMSToken() {
   return null;
 }
 
-function showNotification(message, isError = false) {
+// Notification queue system
+let notificationQueue = [];
+let isNotificationActive = false;
+
+function processNotificationQueue() {
+  if (isNotificationActive || notificationQueue.length === 0) return;
+  
+  isNotificationActive = true;
+  const { message, isError } = notificationQueue.shift();
+  
   const notification = document.createElement('div');
   notification.style.cssText = `
     position: fixed;
@@ -59,12 +68,21 @@ function showNotification(message, isError = false) {
       if (notification.parentNode) {
         notification.parentNode.removeChild(notification);
       }
+      isNotificationActive = false;
+      // Process next notification in queue
+      processNotificationQueue();
     }, 300);
   }, 3000);
 }
 
+function showNotification(message, isError = false) {
+  notificationQueue.push({ message, isError });
+  processNotificationQueue();
+}
+
 let processedURLs = new Set();
 let isProcessing = false;
+let cachedMSToken = null; // Cache MS_TOKEN for the session
 
 function checkAndCaptureURL() {
   const currentURL = window.location.href;
@@ -73,29 +91,23 @@ function checkAndCaptureURL() {
     isProcessing = true;
     processedURLs.add(currentURL);
     
-    // Extract MS_TOKEN whenever we capture a URL
-    const msToken = extractMSToken();
-    
+    // Don't send MS_TOKEN with every URL, it's already cached on page load
     browser.runtime.sendMessage({
       type: 'TIKTOK_URL_FOUND',
-      url: currentURL,
-      msToken: msToken
+      url: currentURL
     });
   }
 }
 
-// Send MS_TOKEN on page load/refresh
+// Send MS_TOKEN on page load/refresh only
 function sendMSToken() {
   const msToken = extractMSToken();
-  if (msToken) {
+  if (msToken && msToken !== cachedMSToken) {
+    cachedMSToken = msToken; // Cache it for this session
     console.log('MS_TOKEN found:', msToken.substring(0, 20) + '...');
     browser.runtime.sendMessage({
       type: 'MS_TOKEN_FOUND',
       msToken: msToken
-    }).then(response => {
-      if (response && response.success) {
-        showNotification('✓ MS_TOKEN updated in config');
-      }
     }).catch(err => {
       console.error('Error sending MS_TOKEN:', err);
     });
@@ -136,10 +148,7 @@ const observer = new MutationObserver(() => {
     lastURL = window.location.href;
     setTimeout(() => {
       checkAndCaptureURL();
-      // Also check for MS_TOKEN on navigation
-      if (window.location.hostname.includes('tiktok.com')) {
-        sendMSToken();
-      }
+      // Don't resend MS_TOKEN on navigation, only on refresh
     }, 1000);
   }
 });
@@ -151,15 +160,14 @@ observer.observe(document.body, {
 
 checkAndCaptureURL();
 
-// Send MS_TOKEN on initial load and page changes
+// Send MS_TOKEN only on initial page load
 if (window.location.hostname.includes('tiktok.com')) {
-  console.log('TikTok page detected, will send MS_TOKEN...');
+  console.log('TikTok page detected, will send MS_TOKEN on initial load...');
   // Wait a bit for cookies to be available
   setTimeout(() => {
     console.log('Attempting to send MS_TOKEN...');
     sendMSToken();
   }, 2000);
   
-  // Also send MS_TOKEN periodically in case it updates
-  setInterval(sendMSToken, 60000); // Every 60 seconds
+  // No longer send MS_TOKEN periodically - only on page refresh
 }

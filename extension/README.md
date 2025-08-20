@@ -2,6 +2,8 @@
 
 Automatically captures TikTok video URLs and saves them to `data/urls.txt`.
 
+**NOTE**: To get this to work on the for you page, open the comments and scroll with comments open. I don't know why this works but it sets the url to the share link, so do this when scrolling the fyp. 
+
 ## Files
 
 - `manifest.json` - Extension configuration file
