@@ -21,11 +21,17 @@ import logging
 class TikTokDownloaderTestFramework:
     """Test framework for validating robust_master_downloader.py functionality"""
     
-    def __init__(self, config_path: str = "test_config.toml", script_path: str = "../robust_master_downloader.py"):
+    def __init__(self, config_path: str = "test_config.toml", script_path: Optional[str] = None):
         """Initialize test framework with configuration"""
         self.config_path = config_path
         self.config = self.load_config()
-        self.script_path = script_path
+        # Use provided script_path, or fall back to config default, or use the old default
+        if script_path:
+            self.script_path = script_path
+        elif self.config.get('test', {}).get('default_script_path'):
+            self.script_path = self.config['test']['default_script_path']
+        else:
+            self.script_path = "../robust_master_downloader.py"
         self.test_start_time = datetime.now()
         self.test_results = {
             "start_time": self.test_start_time.isoformat(),
@@ -806,8 +812,8 @@ def main():
     parser = argparse.ArgumentParser(description="Test framework for TikTok downloader scripts")
     parser.add_argument("--config", default="test_config.toml", help="Path to test configuration file")
     parser.add_argument("--cleanup", action="store_true", help="Clean up test artifacts after completion")
-    parser.add_argument("--with", dest="script_path", default="../robust_master_downloader.py", 
-                        help="Path to the script to test (default: ../robust_master_downloader.py)")
+    parser.add_argument("--with", dest="script_path", default=None, 
+                        help="Path to the script to test (overrides config default)")
     
     args = parser.parse_args()
     
@@ -819,7 +825,7 @@ def main():
             config = toml.load(f)
         config['test']['cleanup_after_test'] = True
         
-    # Run tests
+    # Run tests - pass script_path only if provided via --with
     tester = TikTokDownloaderTestFramework(args.config, args.script_path)
     success = tester.run_tests()
     
