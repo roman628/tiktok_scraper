@@ -21,8 +21,8 @@ textstat>=0.7.0
 TikTokApi>=6.0.0
 
 # Audio processing (for whisper transcription - core feature)
-openai-whisper>=20230314
 faster-whisper>=1.0.0
+torch>=2.0.0  # For GPU detection
 
 # Async and performance
 aiofiles>=0.8.0

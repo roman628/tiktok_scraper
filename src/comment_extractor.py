@@ -8,6 +8,11 @@ from TikTokApi import TikTokApi
 from src.models import Comment
 from src.url_processor import URLProcessor
 
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+
 class CommentExtractor:
     """Handles TikTok comment extraction with API integration."""
     
@@ -26,15 +31,46 @@ class CommentExtractor:
         if not self.ms_token:
             print("Warning: MS_TOKEN not provided. Comment extraction may fail.")
     
-    async def _initialize_api(self):
-        """Initialize TikTok API with browser session."""
+    def _reload_ms_token(self) -> Optional[str]:
+        """Reload MS_TOKEN from config file.
+        
+        Returns:
+            Current MS_TOKEN from config or None
+        """
+        config_path = "config.toml"
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'rb') as f:
+                    config = tomllib.load(f)
+                    return config.get('tiktok', {}).get('ms_token')
+            except Exception:
+                pass
+        return None
+    
+    async def _initialize_api(self, force_new: bool = False):
+        """Initialize TikTok API with browser session.
+        
+        Args:
+            force_new: Force creation of new session even if one exists
+        """
+        # Clean up existing session if forcing new one
+        if force_new and self.api:
+            try:
+                await self.api.close_sessions()
+            except:
+                pass
+            self.api = None
+            self.session = None
+        
         if self.api is None:
             self.api = TikTokApi()
             await self.api.create_sessions(
                 ms_tokens=[self.ms_token],
                 num_sessions=1,
-                sleep_after=3,
-                headless=True
+                sleep_after=1,  # Reduced from 3 to match legacy
+                headless=True,
+                # Critical: suppress resources to avoid bot detection
+                suppress_resource_load_types=["image", "media", "font", "stylesheet"]
             )
             self.session = self.api.sessions[0]
     
@@ -53,7 +89,16 @@ class CommentExtractor:
             return []
         
         try:
-            await self._initialize_api()
+            # Reload MS_TOKEN from config to check for updates
+            current_token = self._reload_ms_token()
+            if current_token and current_token != self.ms_token:
+                print(f"MS_TOKEN updated, creating new session...")
+                self.ms_token = current_token
+                # Force re-initialization with new token
+                await self._initialize_api(force_new=True)
+            else:
+                # Normal initialization
+                await self._initialize_api()
             
             # Get video object
             video = self.api.video(id=video_id)
@@ -81,10 +126,15 @@ class CommentExtractor:
                 # Rate limiting
                 await asyncio.sleep(0.1)
             
+            # Clean up session after extraction to avoid accumulation
+            await self.cleanup()
+            
             return comments
             
         except Exception as e:
             print(f"Error extracting comments: {e}")
+            # Ensure cleanup even on error
+            await self.cleanup()
             return []
     
     def _parse_comment(self, comment_obj) -> Comment:

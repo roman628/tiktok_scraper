@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional
 import yt_dlp
 from src.resource_manager import ResourceManager
 from src.transcript_extractor import TranscriptExtractor
+from src.device_manager import DeviceManager
 
 class VideoExtractor:
     """Handles video downloading and metadata extraction."""
@@ -29,6 +30,7 @@ class VideoExtractor:
         self.proxy = proxy
         self.transcript_extractor = None
         self.shutdown_requested = False
+        self.shutdown_event = None  # Will be set from worker process
     
     def set_shutdown(self, value: bool = True):
         """Set shutdown flag for graceful termination."""
@@ -57,6 +59,10 @@ class VideoExtractor:
             metadata = self._extract_metadata(url)
             if not metadata:
                 return {'success': False, 'error': 'Failed to extract metadata', 'url': url}
+            
+            # Check if video is deleted/private
+            if isinstance(metadata, dict) and metadata.get('deleted'):
+                return {'success': False, 'error': metadata.get('error'), 'deleted': True, 'url': url}
             
             # Create download folder
             folder_name = self._sanitize_filename(metadata['title'])[:100]
@@ -147,7 +153,15 @@ class VideoExtractor:
                 return metadata
                 
         except Exception as e:
-            print(f"Metadata extraction error: {e}")
+            error_str = str(e)
+            print(f"Metadata extraction error: {error_str}")
+            
+            # Check if this is a deleted/private video
+            from src.url_processor import URLProcessor
+            if URLProcessor.is_deleted_video_error(error_str):
+                # Return special marker for deleted video
+                return {"deleted": True, "error": error_str}
+            
             return None
     
     def _download_content(self, url: str, video_folder: Path, folder_name: str, 
@@ -202,7 +216,7 @@ class VideoExtractor:
     def _transcribe_video(self, video_path: Path, whisper_model: Any, device: str) -> str:
         """Transcribe video using Whisper."""
         if whisper_model:
-            # Use provided model directly
+            # Use provided model directly (faster-whisper only)
             try:
                 segments, _ = whisper_model.transcribe(
                     str(video_path),
@@ -217,7 +231,10 @@ class VideoExtractor:
         else:
             # Use TranscriptExtractor
             if not self.transcript_extractor:
-                self.transcript_extractor = TranscriptExtractor(device=device.lower())
+                self.transcript_extractor = TranscriptExtractor(
+                    device=device.lower(),
+                    shutdown_event=self.shutdown_event
+                )
             return self.transcript_extractor.extract_transcript(str(video_path))
     
     def _sanitize_filename(self, filename: str) -> str:
@@ -246,36 +263,45 @@ class VideoExtractor:
         ResourceManager.cleanup_memory()
         ResourceManager.kill_browser_processes()
 
-def load_whisper_model(force_cpu: bool = False):
+def load_whisper_model(force_cpu: bool = False, cache_dir: str = None):
     """Load Whisper model for transcription.
     
     Args:
         force_cpu: Force CPU usage even if GPU available
+        cache_dir: Optional cache directory for model files
         
     Returns:
         Tuple of (model, device_string)
     """
+    # Use DeviceManager for device selection
+    device, compute_type = DeviceManager.get_whisper_device_config(force_cpu)
+    
+    # Force CPU for MPS devices for better compatibility
+    if device == "mps":
+        print("MPS detected, using CPU for better compatibility with faster-whisper")
+        device = "cpu"
+        compute_type = "int8"
+    
+    print(f"Loading Whisper model on {device.upper()}...")
+    
+    # Use faster-whisper only
     from faster_whisper import WhisperModel
     
-    device = "cpu"
-    compute_type = "int8"
-    
-    if not force_cpu:
-        try:
-            import torch
-            if torch.cuda.is_available():
-                device = "cuda"
-                compute_type = "float16"
-                print("Using GPU for Whisper")
-        except ImportError:
-            pass
-    
     try:
-        model = WhisperModel("small.en", device=device, compute_type=compute_type)
+        model_kwargs = {
+            "model_size_or_path": "small.en",
+            "device": device,
+            "compute_type": compute_type
+        }
+        if cache_dir:
+            model_kwargs["download_root"] = cache_dir
+            
+        model = WhisperModel(**model_kwargs)
+        print(f"✓ Whisper model loaded on {device.upper()}")
         return model, device.upper()
     except Exception as e:
-        print(f"Failed to load Whisper model: {e}")
-        if device == "cuda":
+        print(f"Failed to load Whisper model on {device}: {e}")
+        if device != "cpu":
             print("Falling back to CPU")
             model = WhisperModel("small.en", device="cpu", compute_type="int8")
             return model, "CPU"

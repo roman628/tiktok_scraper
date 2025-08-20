@@ -19,23 +19,43 @@ class ResourceManager:
     def __init__(self):
         self.original_sigint_handler = None
         self.cleanup_handlers = []
+        self.shutdown_in_progress = False
+        self.handlers_registered = False
         
     def register_signal_handlers(self, cleanup_callback=None):
         """Register signal handlers for graceful shutdown."""
         if cleanup_callback:
             self.cleanup_handlers.append(cleanup_callback)
         
+        # Only register signal handlers once
+        if self.handlers_registered:
+            return
+            
         def signal_handler(signum, frame):
+            # Prevent multiple executions
+            if self.shutdown_in_progress:
+                print("Shutdown already in progress...")
+                return
+            
+            self.shutdown_in_progress = True
             print("\n\nGraceful shutdown initiated...")
+            
+            # Restore original handler immediately to prevent re-entry
+            if self.original_sigint_handler:
+                signal.signal(signal.SIGINT, self.original_sigint_handler)
+            
             for handler in self.cleanup_handlers:
                 try:
                     handler()
                 except Exception as e:
                     print(f"Error in cleanup handler: {e}")
+            
+            print("Cleanup completed")
             sys.exit(0)
         
         self.original_sigint_handler = signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
+        self.handlers_registered = True
     
     def restore_signal_handlers(self):
         """Restore original signal handlers."""

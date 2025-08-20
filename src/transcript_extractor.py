@@ -2,44 +2,43 @@
 
 import os
 import subprocess
-from typing import Optional, Tuple
-from faster_whisper import WhisperModel
+from typing import Optional, Tuple, Any
 from src.resource_manager import ResourceManager
+from src.device_manager import DeviceManager
 
 class TranscriptExtractor:
     """Handles video transcription using Whisper AI."""
     
-    def __init__(self, model_size: str = "base", device: str = "auto"):
+    def __init__(self, model_size: str = "base", device: str = "auto", shutdown_event=None):
         """Initialize Whisper model.
         
         Args:
             model_size: Whisper model size (tiny, base, small, medium, large)
-            device: Device to use (auto, cuda, cpu)
+            device: Device to use (auto, cuda, mps, cpu)
+            shutdown_event: Event for graceful shutdown
         """
         self.model_size = model_size
-        self.device = self._determine_device(device)
+        self.shutdown_event = shutdown_event
+        
+        # Use DeviceManager for device selection
+        if device == "auto":
+            self.device = DeviceManager.get_best_device()
+        else:
+            self.device = device
+        
         self.model = None
         self._load_model()
     
-    def _determine_device(self, device: str) -> str:
-        """Determine the best device for Whisper."""
-        if device != "auto":
-            return device
-        
-        # Check for CUDA availability
-        if ResourceManager.ensure_cuda_available():
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    return "cuda"
-            except ImportError:
-                pass
-        
-        return "cpu"
-    
     def _load_model(self):
         """Load Whisper model with appropriate settings."""
-        compute_type = "float16" if self.device == "cuda" else "int8"
+        # Force CPU for MPS devices for better compatibility
+        if self.device == "mps":
+            print("MPS detected, using CPU for better compatibility with faster-whisper")
+            self.device = "cpu"
+        
+        # Use faster-whisper only
+        from faster_whisper import WhisperModel
+        compute_type = DeviceManager.get_compute_type(self.device)
         
         try:
             self.model = WhisperModel(
@@ -47,15 +46,18 @@ class TranscriptExtractor:
                 device=self.device,
                 compute_type=compute_type
             )
-            print(f"Loaded Whisper model: {self.model_size} on {self.device}")
+            print(f"Loaded faster-whisper model: {self.model_size} on {self.device.upper()}")
         except Exception as e:
-            print(f"Failed to load Whisper model, falling back to CPU: {e}")
-            self.device = "cpu"
-            self.model = WhisperModel(
-                self.model_size,
-                device="cpu",
-                compute_type="int8"
-            )
+            print(f"Failed to load model on {self.device}: {e}")
+            if self.device != "cpu":
+                print("Falling back to CPU...")
+                self.device = "cpu"
+                self.model = WhisperModel(
+                    self.model_size,
+                    device="cpu",
+                    compute_type="int8"
+                )
+                print(f"Loaded faster-whisper model: {self.model_size} on CPU")
     
     def extract_transcript(self, video_path: str) -> str:
         """Extract transcript from video file.
@@ -76,7 +78,8 @@ class TranscriptExtractor:
             if not audio_path:
                 return ""
             
-            # Transcribe audio
+            # faster-whisper transcription with chunked processing
+            segments_list = []
             segments, info = self.model.transcribe(
                 audio_path,
                 beam_size=5,
@@ -84,8 +87,17 @@ class TranscriptExtractor:
                 condition_on_previous_text=False
             )
             
+            # Process segments in chunks, checking for shutdown
+            for i, segment in enumerate(segments):
+                # Check shutdown every 10 segments
+                if i % 10 == 0 and self.shutdown_event and self.shutdown_event.is_set():
+                    print(f"Transcription interrupted at segment {i} due to shutdown")
+                    break
+                
+                segments_list.append(segment.text.strip())
+            
             # Combine segments into full transcript
-            transcript = " ".join([segment.text.strip() for segment in segments])
+            transcript = " ".join(segments_list)
             
             # Cleanup audio file
             if audio_path != video_path and os.path.exists(audio_path):

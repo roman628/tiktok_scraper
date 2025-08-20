@@ -172,7 +172,15 @@ class RobustTikTokProcessor:
             )
             
             if not video_result['success']:
-                print(f"Download failed: {video_result.get('error')}")
+                error_msg = video_result.get('error', '')
+                print(f"Download failed: {error_msg}")
+                
+                # Check if this is a deleted/private video
+                if video_result.get('deleted'):
+                    # Remove from source file if we have one
+                    if self.source_file:
+                        URLProcessor.remove_url_from_file(url, self.source_file)
+                
                 return False
             
             metadata = video_result['metadata']
@@ -256,6 +264,38 @@ class MultiprocessCoordinator:
         self.url_queue = self.manager.Queue()
         self.result_queue = self.manager.Queue()
         self.shutdown_event = self.manager.Event()
+        self.whisper_config = None
+        
+        # Pre-load Whisper model to cache if needed
+        if args.whisper:
+            print("Pre-loading Whisper model to cache for workers...")
+            model, device = load_whisper_model(force_cpu=args.force_cpu)
+            if model:
+                # Get the cache directory from the model if available
+                cache_dir = None
+                if hasattr(model, 'model_path'):
+                    cache_dir = os.path.dirname(model.model_path)
+                elif hasattr(model, 'download_root'):
+                    cache_dir = model.download_root
+                else:
+                    # Default cache directory for faster-whisper
+                    cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
+                
+                # Prepare configuration for workers
+                self.whisper_config = {
+                    'model_size': 'small.en',
+                    'device': device.lower() if device != 'MPS' else 'cpu',  # Force CPU for MPS
+                    'compute_type': 'int8' if device.lower() == 'cpu' else 'float16',
+                    'cache_dir': cache_dir
+                }
+                print(f"✓ Whisper model cached, workers will load from: {cache_dir}")
+                
+                # Clean up the pre-loaded model to free memory
+                del model
+                import gc
+                gc.collect()
+            else:
+                print("Failed to pre-load Whisper model")
     
     async def process_urls_multiprocess(self, urls: List[str], download_kwargs: Dict[str, Any], 
                                        master_file: str, source_file: Optional[str]):
@@ -275,7 +315,7 @@ class MultiprocessCoordinator:
             worker = mp.Process(
                 target=worker_process,
                 args=(i, self.url_queue, self.result_queue, self.shutdown_event,
-                     self.args, download_kwargs, self.ms_token)
+                     self.args, download_kwargs, self.ms_token, self.whisper_config)
             )
             worker.start()
             workers.append(worker)
@@ -292,6 +332,11 @@ class MultiprocessCoordinator:
                         data_manager.append_to_master(result['data'])
                         self.shared_state['processed'] += 1
                     else:
+                        # Check if it's a deleted video
+                        if result and result.get('deleted') and source_file:
+                            url = result.get('url')
+                            if url:
+                                URLProcessor.remove_url_from_file(url, source_file)
                         self.shared_state['failed'] += 1
                     processed_count += 1
                     
@@ -308,17 +353,71 @@ class MultiprocessCoordinator:
         
         # Wait for workers to finish
         for worker in workers:
-            worker.join(timeout=5)
+            worker.join(timeout=10)  # Give workers 10 seconds to finish gracefully
             if worker.is_alive():
+                print(f"Worker {worker.pid} not responding, terminating...")
                 worker.terminate()
+                worker.join(timeout=2)  # Wait briefly for termination
+                if worker.is_alive():
+                    print(f"Worker {worker.pid} still alive, force killing...")
+                    worker.kill()
         
         print(f"Multiprocessing complete: {self.shared_state['processed']} successful, "
               f"{self.shared_state['failed']} failed")
 
+def load_cached_whisper_model(model_config: Dict[str, Any]):
+    """Load Whisper model from cached configuration.
+    
+    Args:
+        model_config: Configuration dictionary with model parameters
+        
+    Returns:
+        Loaded Whisper model or None
+    """
+    if not model_config:
+        return None
+        
+    try:
+        from faster_whisper import WhisperModel
+        
+        # Extract configuration
+        model_size = model_config.get('model_size', 'small.en')
+        device = model_config.get('device', 'cpu')
+        compute_type = model_config.get('compute_type', 'int8')
+        cache_dir = model_config.get('cache_dir')
+        
+        print(f"Worker loading cached Whisper model: {model_size} on {device.upper()}")
+        
+        # Load model with cache directory to avoid re-downloading
+        model_kwargs = {
+            "model_size_or_path": model_size,
+            "device": device,
+            "compute_type": compute_type
+        }
+        if cache_dir:
+            model_kwargs["download_root"] = cache_dir
+            
+        model = WhisperModel(**model_kwargs)
+        return model
+        
+    except Exception as e:
+        print(f"Failed to load cached Whisper model: {e}")
+        return None
+
 def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
-                  args, download_kwargs: Dict[str, Any], ms_token: Optional[str]):
+                  args, download_kwargs: Dict[str, Any], ms_token: Optional[str],
+                  whisper_config: Dict[str, Any] = None):
     """Worker process for parallel data collection."""
     print(f"Worker {worker_id} started")
+    
+    # Set up signal handler for this worker
+    def worker_signal_handler(signum, frame):
+        print(f"Worker {worker_id} received shutdown signal")
+        shutdown_event.set()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, worker_signal_handler)
+    signal.signal(signal.SIGTERM, worker_signal_handler)
     
     # Initialize components for this worker
     video_extractor = VideoExtractor(
@@ -327,19 +426,36 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
         proxy=download_kwargs.get('proxy')
     )
     
-    # Load whisper model if needed
+    # Pass shutdown event to video extractor
+    video_extractor.shutdown_event = shutdown_event
+    
+    # Load whisper model from cache config if provided
     whisper_model = None
     if args.whisper:
-        whisper_model, _ = load_whisper_model(force_cpu=args.force_cpu)
+        if whisper_config:
+            # Load from cached configuration (avoids re-download)
+            whisper_model = load_cached_whisper_model(whisper_config)
+            if not whisper_model:
+                print(f"Worker {worker_id}: Failed to load Whisper model from cache")
+        else:
+            # Fallback to regular loading (for backwards compatibility)
+            whisper_model, _ = load_whisper_model(force_cpu=args.force_cpu)
     
     # Process URLs
     while not shutdown_event.is_set():
         try:
             url = url_queue.get(timeout=1)
         except:
+            # Check shutdown again after timeout
+            if shutdown_event.is_set():
+                break
             continue
         
         if url is None:
+            break
+        
+        # Check shutdown before processing
+        if shutdown_event.is_set():
             break
         
         # Process URL
@@ -355,11 +471,16 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
             # Extract comments if MS_TOKEN available
             comments = []
             if ms_token:
+                comment_extractor = None
                 try:
                     comment_extractor = CommentExtractor(ms_token=ms_token, max_comments=args.max_comments)
                     comments = [c.to_dict() for c in comment_extractor.extract_comments_sync(url)]
-                except:
-                    pass
+                except Exception as e:
+                    print(f"Error extracting comments: {e}")
+                finally:
+                    # Ensure cleanup happens
+                    if comment_extractor:
+                        comment_extractor.cleanup_sync()
             
             # Prepare data
             video_data = {
@@ -372,7 +493,18 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
             
             result_queue.put({'success': True, 'data': video_data})
         else:
-            result_queue.put({'success': False, 'error': result.get('error')})
+            # Pass along deleted flag if present
+            result_queue.put({
+                'success': False, 
+                'error': result.get('error'),
+                'deleted': result.get('deleted', False),
+                'url': url
+            })
+    
+    # Cleanup before exit
+    video_extractor.cleanup()
+    if whisper_model:
+        del whisper_model
     
     print(f"Worker {worker_id} finished")
 
@@ -620,10 +752,11 @@ async def main():
     whisper_model = None
     whisper_device = "CPU"
     if args.whisper:
-        print("Loading Whisper model...")
+        from src.device_manager import DeviceManager
         whisper_model, whisper_device = load_whisper_model(force_cpu=args.force_cpu)
         if whisper_model:
-            print(f"Whisper model loaded on {whisper_device}")
+            # Print device warning if using multiple workers with CPU
+            DeviceManager.print_device_warning(args.workers, whisper_device.lower())
     
     # Prepare download kwargs
     download_kwargs = {
