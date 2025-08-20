@@ -74,13 +74,6 @@ class VideoExtractor:
                 if transcript:
                     metadata['whisper_transcription'] = transcript
                     metadata['transcription_timestamp'] = datetime.now().isoformat()
-                
-                # Clean up video if audio_only mode
-                if audio_only and download_path.suffix in ['.mp4', '.webm', '.mkv']:
-                    try:
-                        os.remove(download_path)
-                    except:
-                        pass
             
             # Save metadata
             metadata_path = video_folder / 'metadata.json'
@@ -178,15 +171,17 @@ class VideoExtractor:
             ydl_opts['proxy'] = self.proxy
         
         if audio_only:
+            # Extract audio only - no video download at all
             ydl_opts['format'] = 'bestaudio/best'
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
                 'preferredquality': '128',
             }]
-            if use_whisper:
-                ydl_opts['keepvideo'] = True
+            # Never keep video files in audio_only mode
+            ydl_opts['keepvideo'] = False
         else:
+            # Download video
             ydl_opts['format'] = self.quality
         
         try:

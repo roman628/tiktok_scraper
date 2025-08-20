@@ -390,6 +390,61 @@ def auto_clean_master_json(master_file: str):
     except Exception as e:
         print(f"Error cleaning master file: {e}")
 
+def get_cli_provided_args() -> set:
+    """Track which arguments were explicitly provided on CLI."""
+    import sys
+    provided = set()
+    
+    # Map short flags to long names
+    short_flags = {
+        'o': 'output',
+        'q': 'quality'
+    }
+    
+    i = 0
+    argv = sys.argv[1:]
+    while i < len(argv):
+        arg = argv[i]
+        
+        if arg.startswith('--'):
+            # Long flag: --workers, --batch-size
+            flag_name = arg[2:].split('=')[0].replace('-', '_')
+            provided.add(flag_name)
+            # If it's not using '=', the next arg might be its value
+            if '=' not in arg and i + 1 < len(argv) and not argv[i + 1].startswith('-'):
+                i += 1  # Skip the value
+        elif arg.startswith('-') and not arg[1:].replace('.','').replace('-','').isdigit():
+            # Short flag: -o, -q
+            for char in arg[1:]:
+                if char in short_flags:
+                    provided.add(short_flags[char])
+                    # Skip next arg if it's a value for this flag
+                    if i + 1 < len(argv) and not argv[i + 1].startswith('-'):
+                        i += 1
+                elif char == 'h':  # Help flag
+                    pass
+                else:
+                    # Single-letter flags without arguments (like boolean flags)
+                    # Map common ones
+                    if char == 'w':  # Could be whisper
+                        provided.add('whisper')
+        i += 1
+    
+    # Also check for store_true actions that were provided
+    for arg in argv:
+        if arg == '--mp3':
+            provided.add('mp3')
+        elif arg == '--whisper':
+            provided.add('whisper')
+        elif arg == '--force-cpu':
+            provided.add('force_cpu')
+        elif arg == '--force-redownload':
+            provided.add('force_redownload')
+        elif arg == '--clean-progress':
+            provided.add('clean_progress')
+    
+    return provided
+
 def load_config(config_path: str = "config.toml") -> Dict[str, Any]:
     """Load configuration from TOML file."""
     config = {}
@@ -402,8 +457,14 @@ def load_config(config_path: str = "config.toml") -> Dict[str, Any]:
             print(f"Warning: Could not load {config_path}: {e}")
     return config
 
-def merge_config_with_args(args, config: Dict[str, Any]):
-    """Merge TOML config with command-line arguments (CLI takes precedence)."""
+def merge_config_with_args(args, config: Dict[str, Any], cli_provided: set):
+    """Merge TOML config with command-line arguments.
+    
+    Rules:
+    1. CLI explicitly provided args always win
+    2. Config values apply for non-provided args
+    3. Argparse defaults only used if neither CLI nor config provides value
+    """
     if not config:
         return args
     
@@ -435,7 +496,6 @@ def merge_config_with_args(args, config: Dict[str, Any]):
         ('output', 'json_output'): 'json_output',
         
         # Resume settings
-        ('resume', 'skip_duplicates'): None,  # Inverse of force_redownload
         ('resume', 'force_redownload'): 'force_redownload',
         ('resume', 'clean_start'): 'clean_progress',
         
@@ -443,37 +503,33 @@ def merge_config_with_args(args, config: Dict[str, Any]):
         ('network', 'proxy'): 'proxy',
     }
     
-    # Apply config values where CLI args are not set
+    # Apply config values for non-CLI-provided arguments
     for (section, key), arg_name in config_mappings.items():
-        if arg_name is None:
-            continue
-            
         if section in config and key in config[section]:
             config_value = config[section][key]
-            current_value = getattr(args, arg_name, None)
             
-            # Only apply config value if CLI arg was not explicitly set
-            if arg_name == 'from_file':
-                # Special handling for from_file - only use if no URL input provided
-                if not args.url and not args.from_file:
-                    setattr(args, arg_name, config_value)
-            elif arg_name in ['mp3', 'whisper', 'force_cpu', 'force_redownload', 'clean_progress']:
-                # Boolean flags - only override if False (not set via CLI)
-                if not current_value:
-                    setattr(args, arg_name, config_value)
-            elif current_value is None:
-                # Regular arguments - apply if None or still at default
-                setattr(args, arg_name, config_value)
+            # Skip if explicitly provided via CLI
+            if arg_name in cli_provided:
+                continue
+                
+            # Apply config value
+            setattr(args, arg_name, config_value)
+            print(f"  Applied config: {arg_name} = {config_value}")
     
     # Handle skip_duplicates (inverse of force_redownload)
     if 'resume' in config and 'skip_duplicates' in config['resume']:
-        if not args.force_redownload:  # Only apply if not explicitly set
+        if 'force_redownload' not in cli_provided:
             args.force_redownload = not config['resume']['skip_duplicates']
+            print(f"  Applied config: force_redownload = {args.force_redownload} (from skip_duplicates)")
     
     return args
 
 async def main():
     """Main entry point."""
+    # Track CLI arguments BEFORE parsing
+    cli_provided = get_cli_provided_args()
+    print(f"CLI provided arguments: {cli_provided}")
+    
     parser = argparse.ArgumentParser(description="Robust TikTok Data Collector")
     
     # Input options
@@ -497,7 +553,7 @@ async def main():
     # Batch options
     parser.add_argument("--batch-size", type=int, default=10, help="Save every N videos")
     parser.add_argument("--delay", type=int, default=2, help="Delay between requests (seconds)")
-    parser.add_argument("--json-output", type=str, default="master2.json", help="JSON output file")
+    parser.add_argument("--json-output", type=str, default=None, help="JSON output file")
     
     # Resume options
     parser.add_argument("--force-redownload", action="store_true", help="Ignore duplicates")
@@ -513,18 +569,39 @@ async def main():
     config = load_config()
     
     # Merge config with command-line arguments (CLI takes precedence)
-    args = merge_config_with_args(args, config)
+    args = merge_config_with_args(args, config, cli_provided)
     
-    # Default to urls.txt if no input specified (and not in config)
-    if not args.url and not args.from_file:
-        if os.path.exists('urls.txt'):
-            print("Using default: --from-file urls.txt --mp3 --whisper")
-            args.from_file = 'urls.txt'
-            args.mp3 = True
-            args.whisper = True
-        else:
-            print("Error: Provide --url or --from-file (or set default_urls_file in config.toml)")
-            sys.exit(1)
+    # Ensure json_output has a value (fallback to default if not set)
+    if args.json_output is None:
+        args.json_output = "master2.json"
+        print("Warning: No json_output specified in config or CLI, using default: master2.json")
+    
+    # Auto-discovery logic without overriding config
+    if 'url' not in cli_provided and 'from_file' not in cli_provided:
+        if not args.url and not args.from_file:
+            # Check for urls.txt in order of preference
+            possible_files = ['data/urls.txt', 'urls.txt']
+            for file_path in possible_files:
+                if os.path.exists(file_path):
+                    args.from_file = file_path
+                    print(f"Auto-detected input file: {file_path}")
+                    
+                    # Only set defaults if not in config AND not in CLI
+                    if 'mp3' not in cli_provided:
+                        # Check if audio_only is in config
+                        if not ('download' in config and 'audio_only' in config['download']):
+                            args.mp3 = True  # Default for auto-discovery
+                            print("  Applied auto-discovery default: mp3 = True")
+                    
+                    if 'whisper' not in cli_provided:
+                        # Check if use_whisper is in config
+                        if not ('download' in config and 'use_whisper' in config['download']):
+                            args.whisper = True  # Default for auto-discovery
+                            print("  Applied auto-discovery default: whisper = True")
+                    break
+            else:
+                print("Error: Provide --url or --from-file (or set default_urls_file in config.toml)")
+                sys.exit(1)
     
     # Initialize processor
     processor = RobustTikTokProcessor(args)
