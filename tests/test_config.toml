@@ -1,0 +1,36 @@
+# Test Configuration for robust_master_downloader.py
+# This file contains configuration for running integration tests
+
+[tiktok]
+# MS Token for TikTok API access
+# Update this with a valid token before running tests
+ms_token = "Qf1A6tHLCX0gkXdfj0XVZG1yrhl0VuO4dob5j_YB7aHsqHcyIJjJlo3NlTl6Tfl0AV0yNZI2ElykWp6KhIIAoiLTGBipOHv2dEokAKeMbPCI-ufPyUMWZpY10Sme4ibS9LJcVpqwU5jqs7czavmScoo="
+
+[test]
+# Number of URLs to test
+test_url_count = 3
+
+# Maximum time to wait for a single video processing (seconds)
+timeout_per_video = 120
+
+# Enable verbose logging
+verbose = true
+
+# Clean up test files after completion
+cleanup_after_test = false
+
+[processing]
+# Processing options to test
+max_comments = 10
+use_whisper = true
+force_cpu = true
+batch_size = 5
+delay = 2
+workers = 1
+
+[paths]
+# Test file paths
+test_urls_file = "test_urls.txt"
+test_output_file = "test_output.json"
+test_log_file = "test_run.log"
+test_report_file = "test_report.json"

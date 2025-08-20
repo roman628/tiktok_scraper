@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual Environment
+venv/
+.env
+
+# OS
+.DS_Store
+
+# Project data
+data/urls.txt
+model/models/*.pkl
+*.log
+downloads/

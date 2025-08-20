@@ -1,0 +1,5 @@
+# Test URLs for robust_master_downloader.py validation
+# Testing appending and duplicate detection
+# Format: One URL per line
+# Third URL is intentionally a duplicate to test duplicate detection
+https://www.tiktok.com/@dailytextingstoriess/video/7397565326579223838
