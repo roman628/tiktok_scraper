@@ -41,12 +41,18 @@ as we develop this out, ensure that the changes are respecting this, it should r
 
 ## TESTING REQUIREMENTS
 
-**IMPORTANT**: Whenever you modify `robust_master_downloader.py`, you MUST:
+**IMPORTANT**: Whenever you modify `robust_master_downloader.py` or develop new collector scripts, you MUST:
 
 1. **Run the test script** immediately after making changes:
    ```bash
    cd tests
    python test_robust_downloader.py
+   
+   # To test a different script (e.g., when developing the optimized collector.py):
+   python test_robust_downloader.py --with ../collector.py
+   
+   # The --with flag allows testing any script with the same argument interface
+   python test_robust_downloader.py --with ../src/collector.py
    ```
 
 2. **Read and analyze the test report** at `test_report.json` to verify:
@@ -70,7 +76,12 @@ as we develop this out, ensure that the changes are respecting this, it should r
 
 The test uses `test_urls.txt` which contains both unique and duplicate URLs to validate duplicate detection. The test framework will automatically backup existing files and generate a comprehensive report showing exactly what's working and what's failing.
 
-**Never consider robust_master_downloader.py changes complete until the test passes.**
+**Test Framework Features:**
+- **--with flag**: Test different scripts without modifying the test framework (e.g., `--with ../collector.py`)
+- Validates the same argument interface across all collector implementations
+- Allows parallel development of optimized versions while keeping the original working
+
+**Never consider script changes complete until the test passes.**
 
 ## robust_master_downloader.py (collector.py) Overview
 

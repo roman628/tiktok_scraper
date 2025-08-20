@@ -21,14 +21,16 @@ import logging
 class TikTokDownloaderTestFramework:
     """Test framework for validating robust_master_downloader.py functionality"""
     
-    def __init__(self, config_path: str = "test_config.toml"):
+    def __init__(self, config_path: str = "test_config.toml", script_path: str = "../robust_master_downloader.py"):
         """Initialize test framework with configuration"""
         self.config_path = config_path
         self.config = self.load_config()
+        self.script_path = script_path
         self.test_start_time = datetime.now()
         self.test_results = {
             "start_time": self.test_start_time.isoformat(),
             "config_file": config_path,
+            "script_path": script_path,
             "tests_run": [],
             "summary": {}
         }
@@ -80,10 +82,10 @@ class TikTokDownloaderTestFramework:
         self.logger.info("Test environment prepared")
         
     def build_command(self) -> List[str]:
-        """Build command to run robust_master_downloader.py"""
+        """Build command to run the downloader script"""
         cmd = [
             sys.executable,
-            "../robust_master_downloader.py",
+            self.script_path,
             "--from-file", self.config['paths']['test_urls_file'],
             "--json-output", self.config['paths']['test_output_file'],
             "--limit", str(self.config['test']['test_url_count']),
@@ -107,8 +109,8 @@ class TikTokDownloaderTestFramework:
         return cmd
     
     def run_downloader(self) -> Dict[str, Any]:
-        """Run the robust_master_downloader.py script and capture output"""
-        self.logger.info("=== Running robust_master_downloader.py ===")
+        """Run the downloader script and capture output"""
+        self.logger.info(f"=== Running {os.path.basename(self.script_path)} ===")
         
         cmd = self.build_command()
         self.logger.info(f"Command: {' '.join(cmd)}")
@@ -762,7 +764,9 @@ class TikTokDownloaderTestFramework:
     def run_tests(self):
         """Main test execution method"""
         try:
-            print("\n🚀 Starting TikTok Downloader Test Framework")
+            script_name = os.path.basename(self.script_path)
+            print(f"\n🚀 Starting TikTok Downloader Test Framework")
+            print(f"   Testing: {script_name}")
             print("="*60)
             
             # Prepare environment
@@ -799,9 +803,11 @@ def main():
     """Main entry point"""
     import argparse
     
-    parser = argparse.ArgumentParser(description="Test framework for robust_master_downloader.py")
+    parser = argparse.ArgumentParser(description="Test framework for TikTok downloader scripts")
     parser.add_argument("--config", default="test_config.toml", help="Path to test configuration file")
     parser.add_argument("--cleanup", action="store_true", help="Clean up test artifacts after completion")
+    parser.add_argument("--with", dest="script_path", default="../robust_master_downloader.py", 
+                        help="Path to the script to test (default: ../robust_master_downloader.py)")
     
     args = parser.parse_args()
     
@@ -814,7 +820,7 @@ def main():
         config['test']['cleanup_after_test'] = True
         
     # Run tests
-    tester = TikTokDownloaderTestFramework(args.config)
+    tester = TikTokDownloaderTestFramework(args.config, args.script_path)
     success = tester.run_tests()
     
     # Exit with appropriate code
