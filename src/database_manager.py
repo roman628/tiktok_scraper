@@ -558,7 +558,7 @@ class DatabaseOrJsonManager:
             host=db_config.get('host', 'localhost'),
             port=db_config.get('port', 5432),
             database=db_config.get('database', 'tiktok_scraper'),
-            user=db_config.get('user', 'ethan'),
+            user=db_config.get('user'),  # Use config value, no default
             password=db_config.get('password', ''),
             min_connections=db_config.get('min_connections', 2),
             max_connections=db_config.get('max_connections', 10)
