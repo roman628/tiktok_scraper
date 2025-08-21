@@ -3,10 +3,11 @@
 import os
 import asyncio
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 from TikTokApi import TikTokApi
 from src.models import Comment
 from src.url_processor import URLProcessor
+from src.resource_manager import ResourceManager
 
 try:
     import tomllib
@@ -27,6 +28,7 @@ class CommentExtractor:
         self.max_comments = max_comments
         self.api = None
         self.session = None
+        self.browser_pids: Set[int] = set()  # Track browser process PIDs
         
         if not self.ms_token:
             print("Warning: MS_TOKEN not provided. Comment extraction may fail.")
@@ -61,8 +63,15 @@ class CommentExtractor:
                 pass
             self.api = None
             self.session = None
+            # Kill any tracked browser processes
+            if self.browser_pids:
+                ResourceManager.kill_browser_processes(list(self.browser_pids))
+                self.browser_pids.clear()
         
         if self.api is None:
+            # Get current browser PIDs before creating new session
+            pids_before = ResourceManager.get_browser_pids()
+            
             self.api = TikTokApi()
             await self.api.create_sessions(
                 ms_tokens=[self.ms_token],
@@ -72,6 +81,12 @@ class CommentExtractor:
                 browser="webkit"  # Use webkit as suggested by TikTok error
             )
             self.session = self.api.sessions[0]
+            
+            # Track new browser PIDs created by this session
+            pids_after = ResourceManager.get_browser_pids()
+            self.browser_pids = pids_after - pids_before
+            if self.browser_pids:
+                print(f"CommentExtractor: Tracking {len(self.browser_pids)} new browser PIDs: {list(self.browser_pids)}")
     
     async def extract_comments(self, url: str) -> List[Comment]:
         """Extract comments from TikTok video.
@@ -82,6 +97,10 @@ class CommentExtractor:
         Returns:
             List of Comment objects with replies
         """
+        print(f"\n[CommentExtractor] Starting extraction for: {url}")
+        initial_browser_count = len(ResourceManager.get_browser_pids())
+        print(f"[CommentExtractor] Initial browser process count: {initial_browser_count}")
+        
         video_id = URLProcessor.extract_video_id(url)
         if not video_id:
             print(f"Could not extract video ID from URL: {url}")
@@ -125,15 +144,21 @@ class CommentExtractor:
                 # Rate limiting - increased to avoid bot detection
                 await asyncio.sleep(1.0)
             
-            # Clean up session after extraction to avoid accumulation
-            await self.cleanup()
+            # ALWAYS clean up session after extraction to avoid accumulation
+            print(f"[CommentExtractor] Extracted {len(comments)} comments, forcing cleanup...")
+            await self.cleanup(force=True)
+            
+            final_browser_count = len(ResourceManager.get_browser_pids())
+            print(f"[CommentExtractor] Final browser process count: {final_browser_count}")
+            if final_browser_count > initial_browser_count:
+                print(f"[CommentExtractor] WARNING: Browser process leak detected! {final_browser_count - initial_browser_count} processes accumulated")
             
             return comments
             
         except Exception as e:
             print(f"Error extracting comments: {e}")
             # Ensure cleanup even on error
-            await self.cleanup()
+            await self.cleanup(force=True)
             return []
     
     def _parse_comment(self, comment_obj) -> Comment:
@@ -205,19 +230,48 @@ class CommentExtractor:
             print(f"Error in sync comment extraction: {e}")
             return []
     
-    async def cleanup(self):
-        """Clean up API resources."""
+    async def cleanup(self, force: bool = False):
+        """Clean up API resources.
+        
+        Args:
+            force: Force immediate cleanup with process killing
+        """
+        cleanup_success = False
+        
         if self.api:
             try:
-                # Properly close all browser contexts and sessions
+                # Try graceful cleanup first
                 if hasattr(self.api, 'browser'):
                     await self.api.browser.close()
                 await self.api.close_sessions()
+                cleanup_success = True
             except Exception as e:
-                print(f"Warning: Error during cleanup: {e}")
+                print(f"Warning: Graceful cleanup failed: {e}")
             finally:
                 self.api = None
                 self.session = None
+        
+        # Force kill browser processes if requested or cleanup failed
+        if force or not cleanup_success:
+            if self.browser_pids:
+                killed = ResourceManager.kill_browser_processes(list(self.browser_pids))
+                if killed > 0:
+                    print(f"Force killed {killed} tracked browser processes")
+                self.browser_pids.clear()
+            else:
+                # Kill all browser processes as fallback
+                killed = ResourceManager.kill_browser_processes()
+                if killed > 0:
+                    print(f"Killed {killed} browser processes (fallback)")
+        
+        # Verify cleanup success
+        remaining_pids = ResourceManager.get_browser_pids()
+        if remaining_pids:
+            print(f"WARNING: {len(remaining_pids)} browser processes still running after cleanup")
+            # Force kill remaining processes
+            ResourceManager.kill_browser_processes(list(remaining_pids))
+        else:
+            print("Browser cleanup verified: no processes remaining")
     
     def cleanup_sync(self):
         """Synchronous cleanup with proper timeout and fallback."""
@@ -232,8 +286,8 @@ class CommentExtractor:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 
-                # Run cleanup with timeout
-                future = loop.create_task(self.cleanup())
+                # Run cleanup with timeout and force flag
+                future = loop.create_task(self.cleanup(force=True))
                 loop.run_until_complete(asyncio.wait_for(future, timeout=3.0))
                 
             except asyncio.TimeoutError:
@@ -258,8 +312,12 @@ class CommentExtractor:
     def _force_cleanup(self):
         """Force cleanup by killing browser processes."""
         try:
-            from src.resource_manager import ResourceManager
-            ResourceManager.kill_browser_processes()
+            # Kill tracked PIDs first, then scan for any remaining
+            if self.browser_pids:
+                ResourceManager.kill_browser_processes(list(self.browser_pids))
+                self.browser_pids.clear()
+            else:
+                ResourceManager.kill_browser_processes()
         except Exception as e:
             print(f"Warning: Failed to kill browser processes: {e}")
         finally:
