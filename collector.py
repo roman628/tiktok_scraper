@@ -34,6 +34,7 @@ from src.comment_extractor import CommentExtractor
 from src.transcript_extractor import TranscriptExtractor
 from src.display_manager import create_display
 from src.worker_progress import WorkerProgress
+from src.collector_registry import CollectorRegistry, CollectorConfig
 
 # For compatibility with existing code
 from src.video_extractor import VideoExtractor
@@ -63,6 +64,10 @@ class RobustTikTokProcessor:
         
         # Processing state
         self.state = ProcessingState()
+        
+        # Initialize collector registry
+        self.collector_registry = CollectorRegistry()
+        self.config = {}  # Will be loaded later
         
     async def cleanup(self):
         """Cleanup resources on shutdown."""
@@ -182,7 +187,7 @@ class RobustTikTokProcessor:
             p = mp.Process(
                 target=worker_process_wrapper,
                 args=(i, url_queue, result_queue, display_queue, shutdown_event,
-                      self.args, download_kwargs, self.ms_token, whisper_config, len(urls))
+                      self.args, download_kwargs, self.ms_token, whisper_config, len(urls), self.config)
             )
             p.start()
             workers.append(p)
@@ -290,13 +295,13 @@ def load_cached_whisper_model(model_config: Dict[str, Any]):
 def worker_process_wrapper(worker_id: int, url_queue, result_queue, display_queue, 
                            shutdown_event, args, download_kwargs: Dict[str, Any], 
                            ms_token: Optional[str], whisper_config: Dict[str, Any] = None,
-                           total_urls: int = 0):
+                           total_urls: int = 0, config: Optional[Dict[str, Any]] = None):
     """Synchronous wrapper to run the async worker process."""
     try:
         asyncio.run(worker_process(
             worker_id, url_queue, result_queue, display_queue,
             shutdown_event, args, download_kwargs, ms_token,
-            whisper_config, total_urls
+            whisper_config, total_urls, config
         ))
     except KeyboardInterrupt:
         # Let the shutdown event handle termination
@@ -310,12 +315,25 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
                              args,
                              ms_token: Optional[str],
                              whisper_config: Optional[Dict[str, Any]] = None,
-                             shutdown_event: Optional[mp.Event] = None) -> Dict[str, Any]:
+                             shutdown_event: Optional[mp.Event] = None,
+                             config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Process a single TikTok URL with consistent flattened output.
     
     Returns:
         Dict with 'success' bool and 'video_data' if successful or 'error' if failed.
     """
+    # Check data collection config
+    data_collection_config = config.get('data_collection', {}) if config else {}
+    
+    # Build list of enabled collectors from boolean flags
+    enabled_collectors = []
+    if data_collection_config.get('metadata', True):
+        enabled_collectors.append('metadata')
+    if data_collection_config.get('transcription', True):
+        enabled_collectors.append('transcription')
+    if data_collection_config.get('comments', False):
+        enabled_collectors.append('comments')
+    
     # Check for duplicate
     if data_manager.is_duplicate(url):
         progress.send_log("Skipping duplicate", 'info')
@@ -329,15 +347,16 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
         # Download video
         progress.start_download()
         
-        # Setup whisper model if needed
+        # Setup whisper model if needed - check if transcription is enabled
         whisper_model = None
-        if args.whisper and whisper_config:
+        use_whisper = 'transcription' in enabled_collectors and download_kwargs.get('use_whisper', False)
+        if args.whisper and whisper_config and use_whisper:
             whisper_model = whisper_config.get('model')
         
         video_result = video_extractor.download_single_video(
             url,
             audio_only=download_kwargs.get('audio_only', False),
-            use_whisper=download_kwargs.get('use_whisper', False),
+            use_whisper=use_whisper,
             whisper_model=whisper_model,
             whisper_device=whisper_config.get('device', 'CPU').upper() if whisper_config else 'CPU',
             shutdown_event=shutdown_event,
@@ -379,9 +398,9 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
         else:
             progress.skip_transcription("Whisper not enabled")
         
-        # Extract comments if available
+        # Extract comments if available and enabled
         comments = []
-        if comment_extractor and ms_token and (not shutdown_event or not shutdown_event.is_set()):
+        if 'comments' in enabled_collectors and comment_extractor and ms_token and (not shutdown_event or not shutdown_event.is_set()):
             progress.start_comments()
             try:
                 comment_objects = await comment_extractor.extract_comments(url)
@@ -442,7 +461,7 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
 async def worker_process(worker_id: int, url_queue, result_queue, display_queue, 
                   shutdown_event, args, download_kwargs: Dict[str, Any], 
                   ms_token: Optional[str], whisper_config: Dict[str, Any] = None,
-                  total_urls: int = 0):
+                  total_urls: int = 0, config: Optional[Dict[str, Any]] = None):
     """Worker process for parallel data collection."""
     # Initialize progress tracker
     progress = WorkerProgress(worker_id, display_queue, total_urls)
@@ -516,7 +535,8 @@ async def worker_process(worker_id: int, url_queue, result_queue, display_queue,
                 args=args,
                 ms_token=ms_token,
                 whisper_config=whisper_config_with_model,
-                shutdown_event=shutdown_event
+                shutdown_event=shutdown_event,
+                config=config
             )
             
             if shutdown_event.is_set():
@@ -804,6 +824,7 @@ async def main():
     
     # Initialize processor
     processor = RobustTikTokProcessor(args)
+    processor.config = config  # Store config in processor
     
     # Load existing progress
     if not args.force_redownload:

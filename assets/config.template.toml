@@ -86,3 +86,9 @@ log_level = "INFO"
 auto_clean_json = true
 # Enable progress bars
 show_progress = true
+
+[data_collection]
+# Enable/disable specific data collectors
+metadata = true        # Video download and metadata extraction
+transcription = true   # Whisper AI transcription
+comments = false       # TikTok API comments (currently non-functional)
