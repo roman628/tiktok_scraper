@@ -80,7 +80,7 @@ URLs → Filter Duplicates → Process → {
 1. **Video metadata** (views, likes, shares, duration, timestamps, author info)
 2. **Transcripts** (Whisper AI with GPU acceleration)
 3. **Comments** (with nested replies - currently unavailable)
-4. **PostgreSQL storage** with normalized schema, or JSON output for legacy compatibility
+4. **PostgreSQL storage** with normalized schema (primary storage)
 
 ## Configuration
 
@@ -89,7 +89,6 @@ URLs → Filter Duplicates → Process → {
 - `--whisper` / `--force-cpu` - Transcription settings
 - `--ms-token` / `--max-comments` - Comment extraction
 - `--workers` / `--batch-size` - Processing control
-- `--json-output` - Output file
 - `--display-mode` - Display mode (rich/simple/auto)
 - `--raw-log` - Save raw output to timestamped log file
 
@@ -98,9 +97,8 @@ URLs → Filter Duplicates → Process → {
 [tiktok]      # ms_token
 [download]    # quality, whisper settings
 [processing]  # batch_size, delay, workers
-[output]      # json_output file (legacy)
 [display]     # mode, raw_log, refresh_rate, console_lines
-[database]    # PostgreSQL connection settings (enabled=true by default)
+[database]    # PostgreSQL connection settings (always used)
 ```
 
 ## Enhanced Display System
@@ -185,5 +183,18 @@ user = "ethan"
 - Run tests after every change
 - See `/Users/ethan/tiktok_scraper-1/tiktok_data_collection_uml_analysis.md` for class structure
 - See `/Users/ethan/tiktok_scraper-1/database/README.md` for database setup and operations
+
+## Important Implementation Notes
+
+### Database-Only Storage (as of 8/21/2025)
+The system has been fully migrated to PostgreSQL as the primary storage mechanism. All legacy JSON output code has been removed:
+- The `--json-output` CLI flag no longer exists
+- The `[output]` section in config.toml has been removed
+- `DatabaseOrJsonManager` now always uses PostgreSQL (no fallback to JSON)
+- The `master2.json` file is no longer created or updated
+- When testing, use `--force-redownload` to bypass duplicate detection
+- Test scripts export from database using `DatabaseManager.export_to_json()` for validation
+- Default database user is 'ethan' (not 'postgres')
+- The system will error if database connection fails - there's no JSON fallback
 
 **NOTE** comment extraction has been patched indefinitely and there is nothing we can do as of 8/20/2025 to fix it 

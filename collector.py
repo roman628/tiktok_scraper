@@ -46,16 +46,13 @@ class RobustTikTokProcessor:
     
     def __init__(self, args, config=None):
         self.args = args
-        self.master_file = args.json_output
+        self.master_file = None  # Legacy - database is primary storage
         self.source_file = None
         self.shutdown_requested = False
         self.config = config or {}
         
-        # Initialize components - use database if configured
-        if self.config.get('database', {}).get('enabled', False):
-            self.data_manager = DatabaseOrJsonManager(self.config)
-        else:
-            self.data_manager = DataManager(self.master_file)
+        # Initialize components - always use database
+        self.data_manager = DatabaseOrJsonManager(self.config)
         self.video_extractor = VideoExtractor(
             output_dir=args.output,
             quality=args.quality,
@@ -138,6 +135,10 @@ class RobustTikTokProcessor:
     
     def filter_urls(self, urls: List[str]) -> List[str]:
         """Filter out already processed URLs."""
+        # Skip filtering if force_redownload is enabled
+        if self.args.force_redownload:
+            return urls
+        
         filtered = []
         for url in urls:
             if not self.data_manager.is_duplicate(url):
@@ -343,8 +344,8 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
     if data_collection_config.get('comments', False):
         enabled_collectors.append('comments')
     
-    # Check for duplicate
-    if data_manager.is_duplicate(url):
+    # Check for duplicate (unless force_redownload is enabled)
+    if not args.force_redownload and data_manager.is_duplicate(url):
         progress.send_log("Skipping duplicate", 'info')
         return {'success': True, 'duplicate': True}
     
@@ -499,11 +500,8 @@ async def worker_process(worker_id: int, url_queue, result_queue, display_queue,
     if ms_token:
         comment_extractor = CommentExtractor(ms_token=ms_token, max_comments=args.max_comments)
     
-    # Initialize data manager for this worker - use database if configured
-    if config and config.get('database', {}).get('enabled', False):
-        data_manager = DatabaseOrJsonManager(config)
-    else:
-        data_manager = DataManager(args.json_output)
+    # Initialize data manager for this worker - always use database
+    data_manager = DatabaseOrJsonManager(config)
 
     # Setup Whisper
     whisper_model = None
@@ -710,8 +708,6 @@ def merge_config_with_args(args, config: Dict[str, Any], cli_provided: set):
         ('processing', 'delay'): 'delay',
         ('processing', 'workers'): 'workers',
         
-        # Output settings
-        ('output', 'json_output'): 'json_output',
         
         # Display settings
         ('display', 'mode'): 'display_mode',
@@ -780,7 +776,7 @@ async def main():
     # Batch options
     parser.add_argument("--batch-size", type=int, default=10, help="Save every N videos")
     parser.add_argument("--delay", type=int, default=2, help="Delay between requests (seconds)")
-    parser.add_argument("--json-output", type=str, default=None, help="JSON output file")
+    # Legacy json-output removed - using PostgreSQL database
     
     # Resume options
     parser.add_argument("--force-redownload", action="store_true", help="Ignore duplicates")
@@ -805,10 +801,8 @@ async def main():
     # Merge config with command-line arguments (CLI takes precedence)
     args = merge_config_with_args(args, config, cli_provided)
     
-    # Ensure json_output has a value (fallback to default if not set)
-    if args.json_output is None:
-        args.json_output = "master2.json"
-        print("Warning: No json_output specified in config or CLI, using default: master2.json")
+    # Database is now primary storage - no JSON output needed
+    args.json_output = None
     
     # Auto-discovery logic without overriding config
     if 'url' not in cli_provided and 'from_file' not in cli_provided:
@@ -898,7 +892,7 @@ async def main():
         await processor.process_urls(urls, download_kwargs)
         
         # Clean up
-        auto_clean_master_json(processor.master_file)
+        # Legacy auto-clean removed - using database now
         
     except KeyboardInterrupt:
         # This should not be reached due to signal handlers, but keep as fallback

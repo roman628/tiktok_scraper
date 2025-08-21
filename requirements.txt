@@ -2,6 +2,12 @@
 numpy>=1.21.0
 pandas>=1.3.0
 
+# Django framework
+django>=4.2.0
+djangorestframework>=3.14.0
+django-cors-headers>=4.0.0
+psycopg2-binary>=2.9.0  # PostgreSQL adapter
+
 # Web API and server
 fastapi>=0.68.0
 uvicorn[standard]>=0.15.0
@@ -35,8 +41,8 @@ yt-dlp>=2023.1.0
 psutil>=5.9.0
 
 # Configuration loading
-toml>=0.10.2  # For configuration files
-tomli>=2.0.0; python_version < '3.11'  # For Python < 3.11 compatibility
+toml>=0.10.2  # For configuration files (writing)
+tomli>=2.0.0; python_version < '3.11'  # For Python < 3.11 compatibility (reading)
 
 # Rich terminal UI
 rich>=13.0.0  # For enhanced progress display

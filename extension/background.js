@@ -1,7 +1,7 @@
-// Default server configuration
+// Default server configuration - now pointing to Django server
 const DEFAULT_CONFIG = {
   serverUrl: 'http://localhost',
-  serverPort: '8765'
+  serverPort: '8000'  // Django default port
 };
 
 // Get server configuration from storage
@@ -18,9 +18,9 @@ async function getServerConfig() {
   }
 }
 
-// Build the full server URL
+// Build the full server URL for Django API
 function buildServerUrl(config) {
-  return `${config.serverUrl}:${config.serverPort}/add_url`;
+  return `${config.serverUrl}:${config.serverPort}/api/submit-url/`;
 }
 
 // Handle messages from content script and popup
@@ -28,7 +28,7 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
   if (message.type === 'MS_TOKEN_FOUND') {
     // Update MS_TOKEN in config.toml
     const config = await getServerConfig();
-    const updateEndpoint = `${config.serverUrl}:${config.serverPort}/update_token`;
+    const updateEndpoint = `${config.serverUrl}:${config.serverPort}/api/update-token/`;
     
     console.log('Sending MS_TOKEN to server...');
     

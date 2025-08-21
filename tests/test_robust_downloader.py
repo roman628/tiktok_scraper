@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Test Framework for robust_master_downloader.py
-Validates functionality and ensures consistent output
+Test Framework for collector.py
+Validates functionality with PostgreSQL database
 """
 
 import os
@@ -31,7 +31,7 @@ class TikTokDownloaderTestFramework:
         elif self.config.get('test', {}).get('default_script_path'):
             self.script_path = self.config['test']['default_script_path']
         else:
-            self.script_path = "../robust_master_downloader.py"
+            self.script_path = "../collector.py"
         self.test_start_time = datetime.now()
         self.test_results = {
             "start_time": self.test_start_time.isoformat(),
@@ -93,7 +93,7 @@ class TikTokDownloaderTestFramework:
             sys.executable,
             self.script_path,
             "--from-file", self.config['paths']['test_urls_file'],
-            "--json-output", self.config['paths']['test_output_file'],
+            # Database is now used for storage, will export after test
             "--limit", str(self.config['test']['test_url_count']),
             "--batch-size", str(self.config['processing']['batch_size']),
             "--delay", str(self.config['processing']['delay']),
@@ -111,6 +111,9 @@ class TikTokDownloaderTestFramework:
             cmd.append("--whisper")
             if self.config['processing']['force_cpu']:
                 cmd.append("--force-cpu")
+        
+        # Add force-redownload for testing
+        cmd.append("--force-redownload")
         
         return cmd
     
@@ -175,9 +178,51 @@ class TikTokDownloaderTestFramework:
             result["duration"] = time.time() - start_time
             result["end_time"] = datetime.now().isoformat()
             
-            # Test output is already in test_output.json from --json-output flag
+            # Wait a moment for database writes to complete
+            time.sleep(2)
+            
+            # Export from database for test validation
+            self.export_database_for_testing()
         
         return result
+    
+    def export_database_for_testing(self):
+        """Export recent database entries to JSON for testing"""
+        try:
+            # Import database manager
+            import sys
+            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from src.database_manager import DatabaseManager
+            
+            # Use DatabaseManager's built-in export function
+            db = DatabaseManager(
+                host='localhost',
+                database='tiktok_scraper', 
+                user='ethan'
+            )
+            
+            # Export all data to JSON
+            db.export_to_json(self.config['paths']['test_output_file'])
+            
+            # Load and filter to just test videos
+            with open(self.config['paths']['test_output_file'], 'r') as f:
+                all_data = json.load(f)
+            
+            test_video_ids = {'7397565326579223838', '7529063581535587606'}
+            test_data = [v for v in all_data if v.get('video_id') in test_video_ids]
+            
+            # Save filtered data back
+            with open(self.config['paths']['test_output_file'], 'w') as f:
+                json.dump(test_data, f, indent=2)
+                
+            self.logger.info(f"Exported {len(test_data)} test videos from database")
+            db.close()
+                
+        except Exception as e:
+            self.logger.warning(f"Could not export from database, creating empty JSON: {e}")
+            # Create empty JSON file if database export fails
+            with open(self.config['paths']['test_output_file'], 'w') as f:
+                json.dump([], f)
     
     def get_expected_values(self) -> Dict[str, Any]:
         """Define expected values for the test video"""

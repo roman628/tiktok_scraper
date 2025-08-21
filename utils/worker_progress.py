@@ -253,9 +253,9 @@ class WorkerProgress:
         self.send_log(f"Skipping comments: {reason}", 'info')
     
     def start_saving(self):
-        """Start saving to JSON"""
+        """Start saving to database"""
         self.send_progress('saving', 0)
-        self.send_log('Saving to master2.json', 'progress')
+        self.send_log('Saving to database', 'progress')
     
     def complete_saving(self):
         """Complete saving"""

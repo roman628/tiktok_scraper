@@ -541,37 +541,30 @@ class DatabaseManager:
 
 class DatabaseOrJsonManager:
     """
-    Wrapper that can use either DatabaseManager or legacy DataManager
-    based on configuration
+    Database manager wrapper - always uses PostgreSQL
+    Legacy JSON support removed
     """
     
     def __init__(self, config: Dict[str, Any]):
         """
-        Initialize with config determining database or JSON mode
+        Initialize database manager
         
         Args:
             config: Configuration dictionary
         """
-        self.use_database = config.get('database', {}).get('enabled', False)
-        
-        if self.use_database:
-            db_config = config.get('database', {})
-            self.manager = DatabaseManager(
-                host=db_config.get('host', 'localhost'),
-                port=db_config.get('port', 5432),
-                database=db_config.get('database', 'tiktok_scraper'),
-                user=db_config.get('user', 'postgres'),
-                password=db_config.get('password', ''),
-                min_connections=db_config.get('min_connections', 2),
-                max_connections=db_config.get('max_connections', 10)
-            )
-            logger.info("Using PostgreSQL database for storage")
-        else:
-            # Import legacy DataManager only if needed
-            from utils.data_manager import DataManager
-            json_output = config.get('output', {}).get('json_output', 'data/master2.json')
-            self.manager = DataManager(json_output)
-            logger.info("Using JSON file for storage")
+        # Always use database - no longer checking 'enabled' flag
+        db_config = config.get('database', {})
+        self.manager = DatabaseManager(
+            host=db_config.get('host', 'localhost'),
+            port=db_config.get('port', 5432),
+            database=db_config.get('database', 'tiktok_scraper'),
+            user=db_config.get('user', 'ethan'),
+            password=db_config.get('password', ''),
+            min_connections=db_config.get('min_connections', 2),
+            max_connections=db_config.get('max_connections', 10)
+        )
+        self.use_database = True  # Always true now
+        logger.info("Using PostgreSQL database for storage")
     
     def append_to_master(self, video_data: Dict[str, Any]) -> bool:
         """Append video data to storage"""
