@@ -124,7 +124,7 @@ These modules are orchestrated by the main `collector.py` script in the parent d
 
 ```python
 from src.video_extractor import VideoExtractor
-from src.data_manager import DataManager
+from utils.data_manager import DataManager
 from src.models import VideoData
 
 # Example: Extract video and save

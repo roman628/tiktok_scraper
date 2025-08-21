@@ -19,8 +19,8 @@ import queue
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from src.display_manager import create_display
-from src.worker_progress import WorkerProgress
+from utils.display_manager import create_display
+from utils.worker_progress import WorkerProgress
 
 
 # Sample TikTok URLs for simulation

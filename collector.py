@@ -27,14 +27,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 from src.models import VideoData, ProcessingState, Comment
 from src.url_processor import URLProcessor  
-from src.resource_manager import ResourceManager
-from src.data_manager import DataManager
+from utils.resource_manager import ResourceManager
+from utils.data_manager import DataManager
 from src.video_extractor import VideoExtractor, load_whisper_model
 from src.comment_extractor import CommentExtractor
 from src.transcript_extractor import TranscriptExtractor
-from src.display_manager import create_display
-from src.worker_progress import WorkerProgress
-from src.collector_registry import CollectorRegistry, CollectorConfig
+from utils.display_manager import create_display
+from utils.worker_progress import WorkerProgress
+from utils.collector_registry import CollectorRegistry, CollectorConfig
 
 # For compatibility with existing code
 from src.video_extractor import VideoExtractor
@@ -172,7 +172,7 @@ class RobustTikTokProcessor:
         # Setup Whisper config if needed
         whisper_config = None
         if self.args.whisper:
-            from src.device_manager import DeviceManager
+            from utils.device_manager import DeviceManager
             device_manager = DeviceManager()
             device = device_manager.get_best_device(force_cpu=self.args.force_cpu)
             whisper_config = {
@@ -733,7 +733,7 @@ def merge_config_with_args(args, config: Dict[str, Any], cli_provided: set):
 
 async def main():
     """Main entry point with proper shutdown integration."""
-    from src.shutdown_manager import shutdown_manager
+    from utils.shutdown_manager import shutdown_manager
     
     # Initialize shutdown manager first
     shutdown_manager.register_signal_handlers(force_exit_on_double=True)
@@ -838,7 +838,7 @@ async def main():
     
     # Don't load Whisper model in main process - workers will load their own
     if args.whisper:
-        from src.device_manager import DeviceManager
+        from utils.device_manager import DeviceManager
         device, _ = DeviceManager.get_whisper_device_config(args.force_cpu)
         whisper_device = device.upper()
         print(f"\n✓ Using {args.workers} worker(s) with {whisper_device} acceleration.")

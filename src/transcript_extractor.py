@@ -3,8 +3,8 @@
 import os
 import subprocess
 from typing import Optional, Tuple, Any
-from src.resource_manager import ResourceManager
-from src.device_manager import DeviceManager
+from utils.resource_manager import ResourceManager
+from utils.device_manager import DeviceManager
 
 class TranscriptExtractor:
     """Handles video transcription using Whisper AI."""

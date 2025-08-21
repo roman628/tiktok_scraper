@@ -10,9 +10,9 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional
 import yt_dlp
-from src.resource_manager import ResourceManager
+from utils.resource_manager import ResourceManager
 from src.transcript_extractor import TranscriptExtractor
-from src.device_manager import DeviceManager
+from utils.device_manager import DeviceManager
 
 class VideoExtractor:
     """Handles video downloading and metadata extraction."""

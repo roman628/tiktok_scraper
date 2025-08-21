@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Optional, Set
 from TikTokApi import TikTokApi
 from src.models import Comment
 from src.url_processor import URLProcessor
-from src.resource_manager import ResourceManager
+from utils.resource_manager import ResourceManager
 
 try:
     import tomllib
