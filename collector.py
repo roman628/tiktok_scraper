@@ -811,49 +811,54 @@ async def main():
     database_mode = False
     db = None
     
+    # Check if we should use database mode (no CLI arguments provided)
     if 'url' not in cli_provided and 'from_file' not in cli_provided:
-        if not args.url and not args.from_file:
-            # Check database queue for pending URLs
-            from src.database_manager import DatabaseManager
-            
-            db_config = config.get('database', {})
-            if db_config.get('enabled', True):
-                try:
-                    db = DatabaseManager(
-                        host=db_config.get('host', 'localhost'),
-                        database=db_config.get('database', 'tiktok_scraper'),
-                        user=db_config.get('user'),  # Use config value, no default
-                        password=db_config.get('password', ''),
-                        port=db_config.get('port', 5432)
-                    )
-                    database_mode = True
-                    
-                    # Mark collector as running in database
-                    with db.get_cursor() as cursor:
-                        cursor.execute("""
-                            INSERT INTO collector_status (status, started_at, pid)
-                            VALUES ('running', NOW(), %s)
-                            ON CONFLICT (id) DO UPDATE
-                            SET status = 'running', started_at = NOW(), pid = %s
-                            WHERE collector_status.id = 1
-                        """, (os.getpid(), os.getpid()))
-                        cursor.connection.commit()
-                    
-                    # Apply defaults if not in config
-                    if 'mp3' not in cli_provided:
-                        if not ('download' in config and 'audio_only' in config['download']):
-                            args.mp3 = True
-                            
-                    if 'whisper' not in cli_provided:
-                        if not ('download' in config and 'use_whisper' in config['download']):
-                            args.whisper = True
-                            
-                except Exception as e:
-                    print(f"Error connecting to database: {e}")
-                    return
-            else:
-                print("Database is disabled in config.toml")
+        # Database queue mode - ignore config file defaults for from_file
+        # Check database queue for pending URLs
+        from src.database_manager import DatabaseManager
+        
+        db_config = config.get('database', {})
+        if db_config.get('enabled', True):
+            try:
+                db = DatabaseManager(
+                    host=db_config.get('host', 'localhost'),
+                    database=db_config.get('database', 'tiktok_scraper'),
+                    user=db_config.get('user'),  # Use config value, no default
+                    password=db_config.get('password', ''),
+                    port=db_config.get('port', 5432)
+                )
+                database_mode = True
+                
+                # Clear args.from_file to prevent conflict with database mode
+                args.from_file = None
+                args.url = None
+                
+                # Mark collector as running in database
+                with db.get_cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO collector_status (status, started_at, pid)
+                        VALUES ('running', NOW(), %s)
+                        ON CONFLICT (id) DO UPDATE
+                        SET status = 'running', started_at = NOW(), pid = %s
+                        WHERE collector_status.id = 1
+                    """, (os.getpid(), os.getpid()))
+                    cursor.connection.commit()
+                
+                # Apply defaults if not in config
+                if 'mp3' not in cli_provided:
+                    if not ('download' in config and 'audio_only' in config['download']):
+                        args.mp3 = True
+                        
+                if 'whisper' not in cli_provided:
+                    if not ('download' in config and 'use_whisper' in config['download']):
+                        args.whisper = True
+                        
+            except Exception as e:
+                print(f"Error connecting to database: {e}")
                 return
+        else:
+            print("Database is disabled in config.toml")
+            return
     
     # Database continuous processing loop
     if database_mode:
@@ -866,7 +871,7 @@ async def main():
         print(f"Will check for new URLs every {check_interval} seconds")
         print("Press Ctrl+C to stop\n")
         
-        while not shutdown_manager.shutdown_requested:
+        while not shutdown_manager.shutdown_event.is_set():
             try:
                 # Get pending URLs from queued_urls table
                 with db.get_cursor() as cursor:
