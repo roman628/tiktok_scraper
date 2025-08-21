@@ -175,7 +175,8 @@ class DatabaseManager:
                     self._update_processing_status(cursor, video_id, video_data)
                     
                     # Add to cache
-                    self.url_cache.add(video_data['url'])
+                    if 'video_id' in video_data:
+                        self.video_id_cache.add(video_data['video_id'])
                     
                     conn.commit()
                     logger.debug(f"Successfully inserted video: {video_data.get('video_id')}")
@@ -321,7 +322,8 @@ class DatabaseManager:
                                                         video_data.get('comments_extracted_at'))
                                 self._update_processing_status(cursor, video_id, video_data)
                                 
-                                self.url_cache.add(video_data['url'])
+                                if 'video_id' in video_data:
+                                    self.video_id_cache.add(video_data['video_id'])
                                 inserted_count += 1
                 
                 conn.commit()
