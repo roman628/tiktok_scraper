@@ -60,14 +60,12 @@ class WorkerProgress:
         
         return min(100, completed_weight)
     
-    def send_status(self, status: str, url: Optional[str] = None):
+    def send_status(self, status: str):
         """Send status update to display"""
-        self.current_url = url
         self.display_queue.put({
             'type': 'status',
             'worker_id': self.worker_id,
-            'status': status,
-            'url': url
+            'status': status
         })
     
     def send_progress(self, stage: str, stage_progress: float = 0, 
@@ -154,7 +152,11 @@ class WorkerProgress:
     def start_url(self, url: str):
         """Start processing a new URL"""
         self.current_url = url
-        self.send_status('processing', url)
+        self.display_queue.put({
+            'type': 'start',
+            'worker_id': self.worker_id,
+            'url': url
+        })
         self.send_progress('validating', 0)
         self.send_log('URL validation started', 'info')
     

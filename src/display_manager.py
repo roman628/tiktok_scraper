@@ -7,6 +7,7 @@ import math
 import signal
 import shutil
 import time
+import threading
 from collections import deque
 from datetime import datetime
 from multiprocessing import Queue
@@ -78,6 +79,7 @@ class DisplayManager:
         self.num_workers = num_workers
         self.total_urls = total_urls
         self.refresh_rate = refresh_rate
+        self.lock = threading.Lock()
         
         # Calculate URLs per worker
         base_urls_per_worker = total_urls // num_workers
@@ -361,65 +363,70 @@ class DisplayManager:
         Args:
             update: Dictionary containing update information
         """
-        update_type = update.get('type')
-        worker_id = update.get('worker_id')
-        
-        if worker_id is None or worker_id not in self.workers:
-            return
-        
-        worker = self.workers[worker_id]
-        
-        # Write to raw log
-        self.write_raw_log(f"[Worker {worker_id}] {update}")
-        
-        if update_type == 'status':
-            worker.status = update.get('status', worker.status)
-            worker.current_url = update.get('url', worker.current_url)
-            if update.get('stage'):
-                worker.current_stage = update['stage']
-        
-        elif update_type == 'progress':
-            worker.current_url_progress = update.get('progress', 0)
-            if 'completed_urls' in update:
-                worker.completed_urls = update['completed_urls']
-            if 'stage' in update:
-                worker.current_stage = update['stage']
-            if 'stage_details' in update:
-                worker.stage_details = update['stage_details']
-        
-        elif update_type == 'log':
-            log_entry = {
-                'level': update.get('level', 'info'),
-                'message': update.get('message', ''),
-                'timestamp': time.time()
-            }
-            worker.log_buffer.append(log_entry)
-        
-        elif update_type == 'error':
-            worker.status = 'error'
-            worker.error_message = update.get('error', 'Unknown error')
-            worker.log_buffer.append({
-                'level': 'error',
-                'message': worker.error_message
-            })
-        
-        elif update_type == 'complete':
-            worker.completed_urls = update.get('completed_urls', worker.completed_urls)
-            worker.current_url_progress = 100
-            worker.log_buffer.append({
-                'level': 'success',
-                'message': f"Completed URL {worker.completed_urls}/{worker.total_urls}"
-            })
-            # Start flash animation
-            worker.flash_complete = True
-            worker.flash_count = 6  # Flash 3 times (on/off = 6 transitions)
-            worker.flash_time = time.time()
-            # Reset for next URL
-            worker.current_url = None
-            worker.current_url_progress = 0
-            worker.current_stage = 'Waiting for next URL'
-        
-        worker.last_update = time.time()
+        with self.lock:
+            update_type = update.get('type')
+            worker_id = update.get('worker_id')
+            
+            if worker_id is None or worker_id not in self.workers:
+                return
+            
+            worker = self.workers[worker_id]
+            
+            # Write to raw log
+            self.write_raw_log(f"[Worker {worker_id}] {update}")
+            
+            if update_type == 'start':
+                worker.status = 'processing'
+                worker.current_url = update.get('url')
+                worker.current_stage = 'Starting'
+            
+            elif update_type == 'status':
+                worker.status = update.get('status', worker.status)
+                if update.get('stage'):
+                    worker.current_stage = update['stage']
+            
+            elif update_type == 'progress':
+                worker.current_url_progress = update.get('progress', 0)
+                if 'completed_urls' in update:
+                    worker.completed_urls = update['completed_urls']
+                if 'stage' in update:
+                    worker.current_stage = update['stage']
+                if 'stage_details' in update:
+                    worker.stage_details = update['stage_details']
+            
+            elif update_type == 'log':
+                log_entry = {
+                    'level': update.get('level', 'info'),
+                    'message': update.get('message', ''),
+                    'timestamp': time.time()
+                }
+                worker.log_buffer.append(log_entry)
+            
+            elif update_type == 'error':
+                worker.status = 'error'
+                worker.error_message = update.get('error', 'Unknown error')
+                worker.log_buffer.append({
+                    'level': 'error',
+                    'message': worker.error_message
+                })
+            
+            elif update_type == 'complete':
+                worker.completed_urls = update.get('completed_urls', worker.completed_urls)
+                worker.current_url_progress = 100
+                worker.log_buffer.append({
+                    'level': 'success',
+                    'message': f"Completed URL {worker.completed_urls}/{worker.total_urls}"
+                })
+                # Start flash animation
+                worker.flash_complete = True
+                worker.flash_count = 6  # Flash 3 times (on/off = 6 transitions)
+                worker.flash_time = time.time()
+                # Reset for next URL
+                worker.current_url = None
+                worker.current_url_progress = 0
+                worker.current_stage = 'Waiting for next URL'
+            
+            worker.last_update = time.time()
     
     def start(self):
         """Start the live display"""
@@ -443,32 +450,33 @@ class DisplayManager:
     
     def update(self):
         """Update the display (call after processing updates)"""
-        if self.live:
-            # Check if terminal was resized
-            if self.resize_pending:
-                terminal_size = shutil.get_terminal_size()
-                new_dimensions = (terminal_size.columns, terminal_size.lines)
+        with self.lock:
+            if self.live:
+                # Check if terminal was resized
+                if self.resize_pending:
+                    terminal_size = shutil.get_terminal_size()
+                    new_dimensions = (terminal_size.columns, terminal_size.lines)
+                    
+                    if new_dimensions != self.last_dimensions:
+                        self.last_dimensions = new_dimensions
+                        # Force layout recalculation on next render
+                        self.layout_config = None
+                    
+                    self.resize_pending = False
                 
-                if new_dimensions != self.last_dimensions:
-                    self.last_dimensions = new_dimensions
-                    # Force layout recalculation on next render
-                    self.layout_config = None
+                # Handle flash animations
+                current_time = time.time()
+                for worker in self.workers.values():
+                    if worker.flash_complete and worker.flash_count > 0:
+                        # Flash every 0.15 seconds
+                        if current_time - worker.flash_time > 0.15:
+                            worker.flash_count -= 1
+                            worker.flash_time = current_time
+                            # Toggle flash state
+                            worker.flash_complete = not worker.flash_complete if worker.flash_count > 0 else False
                 
-                self.resize_pending = False
-            
-            # Handle flash animations
-            current_time = time.time()
-            for worker in self.workers.values():
-                if worker.flash_complete and worker.flash_count > 0:
-                    # Flash every 0.15 seconds
-                    if current_time - worker.flash_time > 0.15:
-                        worker.flash_count -= 1
-                        worker.flash_time = current_time
-                        # Toggle flash state
-                        worker.flash_complete = not worker.flash_complete if worker.flash_count > 0 else False
-            
-            # Update display with new content
-            self.live.update(self.render_display())
+                # Update display with new content
+                self.live.update(self.render_display())
     
     def get_summary(self) -> Dict:
         """Get summary statistics of all workers"""

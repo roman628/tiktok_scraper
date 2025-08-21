@@ -64,30 +64,23 @@ class RobustTikTokProcessor:
         # Processing state
         self.state = ProcessingState()
         
-        # Register signal handlers
-        self.resource_manager.register_signal_handlers(self.cleanup)
-    
-    def cleanup(self):
+    async def cleanup(self):
         """Cleanup resources on shutdown."""
-        import concurrent.futures
         self.shutdown_requested = True
         self.save_progress()
-        
-        # Cleanup with timeout
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = []
-            
-            # Schedule cleanup tasks
-            if self.comment_extractor:
-                futures.append(executor.submit(self.comment_extractor.cleanup_sync))
-            futures.append(executor.submit(self.video_extractor.cleanup))
-            
-            # Wait for cleanup with timeout
-            done, not_done = concurrent.futures.wait(futures, timeout=5)
-            
-            if not_done:
-                print("Warning: Some cleanup tasks timed out")
-                # Force kill browser processes if cleanup hangs
+
+        cleanup_tasks = []
+        if self.comment_extractor:
+            cleanup_tasks.append(self.comment_extractor.cleanup())
+
+        # video_extractor cleanup is synchronous
+        self.video_extractor.cleanup()
+
+        if cleanup_tasks:
+            try:
+                await asyncio.wait_for(asyncio.gather(*cleanup_tasks), timeout=5.0)
+            except asyncio.TimeoutError:
+                print("Warning: Async cleanup timed out, forcing browser kill")
                 self.resource_manager.kill_browser_processes()
         
         print("Cleanup completed")
@@ -458,12 +451,13 @@ class MultiprocessCoordinator:
         
         # Start worker processes
         workers = []
+        url_start_idx = 0
         for i in range(self.num_workers):
             # Calculate URLs for this worker - distribute evenly
             worker_url_count = base_urls_per_worker + (1 if i < extra_urls else 0)
             
             worker = mp.Process(
-                target=worker_process,
+                target=worker_process_wrapper,
                 args=(i, self.url_queue, self.result_queue, self.display_queue, 
                      self.shutdown_event, self.args, download_kwargs, self.ms_token, 
                      self.whisper_config, worker_url_count)
@@ -582,7 +576,22 @@ def load_cached_whisper_model(model_config: Dict[str, Any]):
         print(f"Failed to load Whisper model: {e}")
         return None
 
-def worker_process(worker_id: int, url_queue, result_queue, display_queue, 
+def worker_process_wrapper(worker_id: int, url_queue, result_queue, display_queue, 
+                           shutdown_event, args, download_kwargs: Dict[str, Any], 
+                           ms_token: Optional[str], whisper_config: Dict[str, Any] = None,
+                           total_urls: int = 0):
+    """Synchronous wrapper to run the async worker process."""
+    try:
+        asyncio.run(worker_process(
+            worker_id, url_queue, result_queue, display_queue,
+            shutdown_event, args, download_kwargs, ms_token,
+            whisper_config, total_urls
+        ))
+    except KeyboardInterrupt:
+        # Let the shutdown event handle termination
+        pass
+
+async def worker_process(worker_id: int, url_queue, result_queue, display_queue, 
                   shutdown_event, args, download_kwargs: Dict[str, Any], 
                   ms_token: Optional[str], whisper_config: Dict[str, Any] = None,
                   total_urls: int = 0):
@@ -591,17 +600,10 @@ def worker_process(worker_id: int, url_queue, result_queue, display_queue,
     progress = WorkerProgress(worker_id, display_queue, total_urls)
     progress.send_status('initializing')
     
-    silent = False  # Set silent flag for logging
-    
-    # Import shutdown handler for worker
-    from src.shutdown_manager import WorkerShutdownHandler
-    worker_handler = WorkerShutdownHandler(worker_id, shutdown_event)
-    
-    # Set up signal handler for this worker
+    # Set up signal handler for this worker to set the shared event
     def worker_signal_handler(signum, frame):
         print(f"Worker {worker_id} received shutdown signal")
         shutdown_event.set()
-        # Don't exit immediately - let the worker loop handle cleanup
     
     signal.signal(signal.SIGINT, worker_signal_handler)
     signal.signal(signal.SIGTERM, worker_signal_handler)
@@ -612,56 +614,42 @@ def worker_process(worker_id: int, url_queue, result_queue, display_queue,
         quality=args.quality,
         proxy=download_kwargs.get('proxy')
     )
-    
-    # Pass shutdown event to video extractor
     video_extractor.shutdown_event = shutdown_event
     
-    # Setup Whisper - each worker loads its own model
+    comment_extractor = None
+    if ms_token:
+        comment_extractor = CommentExtractor(ms_token=ms_token, max_comments=args.max_comments)
+
+    # Setup Whisper
     whisper_model = None
-    
     if args.whisper:
         progress.send_log('Loading Whisper model...', 'info')
         if whisper_config:
-            # Load local model for this worker
             whisper_model = load_cached_whisper_model(whisper_config)
             if whisper_model:
                 progress.send_log(f"Loaded Whisper model on {whisper_config.get('device', 'cpu').upper()}", 'success')
             else:
                 progress.send_log('Failed to load Whisper model', 'error')
-        else:
-            # Fallback
-            whisper_model, _ = load_whisper_model(force_cpu=args.force_cpu)
     
-    progress.send_status('idle')  # Ready to process
-    
-    # Process URLs with shutdown checking
+    progress.send_status('idle')
+
     try:
         while not shutdown_event.is_set():
             try:
-                url = url_queue.get(timeout=0.5)  # Shorter timeout for responsiveness
-                if url is None:  # Sentinel value for shutdown
+                url = url_queue.get(timeout=0.5)
+                if url is None:
                     break
             except queue.Empty:
                 continue
-            except Exception:
-                if shutdown_event.is_set():
-                    break
-                continue
-            
-            # Check shutdown before starting work
+
             if shutdown_event.is_set():
-                # Put URL back for another worker if possible
                 try:
                     url_queue.put(url, timeout=0.1)
                 except:
                     pass
                 break
-            
-            # Process URL with shutdown event passed
+
             progress.start_url(url)
-            
-            # Start download with progress tracking
-            progress.start_download()
             
             result = video_extractor.download_single_video(
                 url,
@@ -669,53 +657,31 @@ def worker_process(worker_id: int, url_queue, result_queue, display_queue,
                 use_whisper=args.whisper,
                 whisper_model=whisper_model,
                 whisper_device=whisper_config.get('device', 'cpu').upper() if whisper_config else 'CPU',
-                shutdown_event=shutdown_event,  # Pass shutdown event
-                progress_callback=progress  # Pass the progress tracker directly
+                shutdown_event=shutdown_event,
+                progress_callback=progress
             )
-        
-            # Check shutdown after download
+
             if shutdown_event.is_set():
                 break
-                
+
             if result['success']:
-                # Update progress based on result metadata
-                if 'metadata' in result:
-                    metadata = result['metadata']
-                    if 'likes' in metadata and 'comment_count' in metadata:
-                        progress.complete_metadata(metadata.get('likes', 0), metadata.get('comment_count', 0))
-                    
-                    # Transcription was done if whisper_transcription exists
-                    if 'whisper_transcription' in metadata:
-                        progress.complete_transcription(metadata.get('video_duration', 0))
-                
-                # Extract comments if MS_TOKEN available
+                metadata = result.get('metadata', {})
                 comments = []
-                if ms_token and not shutdown_event.is_set():
+                if comment_extractor and not shutdown_event.is_set():
                     progress.start_comments()
-                    comment_extractor = None
                     try:
-                        comment_extractor = CommentExtractor(ms_token=ms_token, max_comments=args.max_comments)
-                        comments = [c.to_dict() for c in comment_extractor.extract_comments_sync(url)]
+                        comment_objects = await comment_extractor.extract_comments(url)
+                        comments = [c.to_dict() for c in comment_objects]
                         progress.complete_comments(len(comments))
                     except Exception as e:
                         progress.report_error('comments', str(e))
-                    finally:
-                        # Ensure cleanup happens
-                        if comment_extractor:
-                            comment_extractor.cleanup_sync()
-                            # Give Playwright a moment to fully clean up
-                            import time
-                            time.sleep(0.1)
-                else:
-                    progress.skip_comments()
-                
-                # Prepare data
+
                 progress.start_saving()
                 video_data = {
                     'url': url,
-                    'video_id': result['metadata'].get('video_id', ''),
-                    'transcript': result['metadata'].get('whisper_transcription', ''),
-                    'metadata': result['metadata'],
+                    'video_id': metadata.get('video_id', ''),
+                    'transcript': metadata.get('whisper_transcription', ''),
+                    'metadata': metadata,
                     'comments': comments
                 }
                 
@@ -724,11 +690,8 @@ def worker_process(worker_id: int, url_queue, result_queue, display_queue,
                     progress.complete_saving()
                     progress.complete_url()
             else:
-                # Report error
                 error_msg = result.get('error', 'Unknown error')
                 progress.report_error('processing', error_msg)
-                
-                # Pass along deleted flag if present
                 if not shutdown_event.is_set():
                     result_queue.put({
                         'success': False, 
@@ -736,19 +699,20 @@ def worker_process(worker_id: int, url_queue, result_queue, display_queue,
                         'deleted': result.get('deleted', False),
                         'url': url
                     })
-    
+
     except Exception as e:
         print(f"Worker {worker_id} error: {e}")
     finally:
-        # Cleanup with timeout protection
+        # Cleanup
         try:
             video_extractor.cleanup()
+            if comment_extractor:
+                await comment_extractor.cleanup()
             if whisper_model:
                 del whisper_model
         except Exception as e:
             print(f"Worker {worker_id} cleanup error: {e}")
         
-        # Send sentinel to indicate this worker is done
         try:
             result_queue.put(None, timeout=0.1)
         except:
@@ -839,7 +803,7 @@ def load_config(config_path: str = "config.toml") -> Dict[str, Any]:
     return config
 
 def merge_config_with_args(args, config: Dict[str, Any], cli_provided: set):
-    """Merge TOML config with command-line arguments.
+    """Merge TOML config with command-line arguments. 
     
     Rules:
     1. CLI explicitly provided args always win
@@ -998,11 +962,10 @@ async def main():
                     break
             else:
                 print("Error: Provide --url or --from-file (or set default_urls_file in config.toml)")
-                sys.exit(1)
+                return
     
-    # Initialize processor with shutdown manager
+    # Initialize processor
     processor = RobustTikTokProcessor(args)
-    shutdown_manager.register_cleanup_handler(processor.cleanup)
     
     # Load existing progress
     if not args.force_redownload:
@@ -1053,15 +1016,15 @@ async def main():
     
     if not urls:
         print("No URLs to process")
-        sys.exit(1)
-    
+        return
+
     # Filter duplicates
     original_count = len(urls)
     urls = processor.filter_urls(urls)
     
     if not urls:
         print(f"All {original_count} URLs already processed!")
-        sys.exit(0)
+        return
     
     print(f"Processing {len(urls)} of {original_count} URLs")
     
@@ -1074,7 +1037,7 @@ async def main():
             # Multiprocess mode
             if not args.from_file:
                 print("Multiprocessing requires --from-file")
-                sys.exit(1)
+                return
             
             coordinator = MultiprocessCoordinator(args, processor.ms_token)
             coordinator.shutdown_event = shutdown_manager.shutdown_event
@@ -1098,8 +1061,7 @@ async def main():
     finally:
         # Ensure cleanup runs if not already initiated
         if not shutdown_manager.shutdown_initiated:
-            processor.cleanup()
-        sys.exit(0)
+            await processor.cleanup()
 
 if __name__ == "__main__":
     # Set spawn method for CUDA compatibility BEFORE any imports that might use multiprocessing

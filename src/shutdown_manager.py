@@ -45,22 +45,8 @@ class ShutdownManager:
             print(f"\nReceived signal {signum}, initiating graceful shutdown...")
             print("Press Ctrl+C again to force immediate termination.")
             self.shutdown_event.set()
-            
-            # Run cleanup handlers with timeout protection
-            for handler in self.cleanup_handlers:
-                try:
-                    # Use threading timer for timeout since we can't use signals in signal handler
-                    cleanup_thread = threading.Thread(target=handler)
-                    cleanup_thread.daemon = True
-                    cleanup_thread.start()
-                    cleanup_thread.join(timeout=5.0)
-                    if cleanup_thread.is_alive():
-                        print(f"Warning: Cleanup handler timed out")
-                except Exception as e:
-                    print(f"Warning: Error in cleanup handler: {e}")
-            
-            print("Graceful shutdown completed")
-            sys.exit(0)
+
+            # The main application loop will now handle cleanup and exit.
         
         # Store original handlers
         self._original_handlers[signal.SIGINT] = signal.signal(signal.SIGINT, signal_handler)
