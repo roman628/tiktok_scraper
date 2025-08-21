@@ -245,6 +245,8 @@ class CommentExtractor:
             finally:
                 if loop and not loop.is_closed():
                     try:
+                        # Give Playwright tasks a moment to finish
+                        loop.run_until_complete(asyncio.sleep(0.1))
                         loop.close()
                     except:
                         pass

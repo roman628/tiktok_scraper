@@ -528,6 +528,9 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
                         # Ensure cleanup happens
                         if comment_extractor:
                             comment_extractor.cleanup_sync()
+                            # Give Playwright a moment to fully clean up
+                            import time
+                            time.sleep(0.1)
                 
                 # Prepare data
                 video_data = {
