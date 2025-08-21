@@ -3,9 +3,12 @@
 import subprocess
 import os
 import json
+import logging
 from typing import List, Optional
 from django.conf import settings
 from .models import QueuedURL
+
+logger = logging.getLogger(__name__)
 
 
 class CollectorService:
@@ -78,7 +81,12 @@ class CollectorService:
             urls = CollectorService.get_pending_urls()
         
         if not urls:
+            logger.info("No URLs to process")
             return None
+        
+        # Log collector start
+        logger.info(f"🚀 Starting collector.py with {len(urls)} URL(s) and {workers} worker(s)")
+        logger.info(f"Processing URLs: {', '.join(urls[:3])}{'...' if len(urls) > 3 else ''}")
         
         # Mark URLs as processing
         QueuedURL.objects.filter(url__in=urls).update(status='processing')
@@ -96,6 +104,9 @@ class CollectorService:
         if getattr(settings, 'TIKTOK_AUDIO_ONLY', True):
             cmd.append('--mp3')
         
+        # Log full command
+        logger.info(f"Command: {' '.join(cmd)}")
+        
         # Since database is enabled, don't write to JSON
         # The collector will read from config.toml and see database.enabled = true
         
@@ -106,6 +117,8 @@ class CollectorService:
             stderr=subprocess.PIPE,
             cwd=settings.BASE_DIR  # Run from project root
         )
+        
+        logger.info(f"Collector started with PID: {process.pid}")
         
         return process
     

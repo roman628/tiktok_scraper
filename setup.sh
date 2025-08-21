@@ -200,6 +200,262 @@ create_main_config() {
     print_msg $GREEN "\n✓ config.toml created successfully!"
 }
 
+# Function to setup PostgreSQL database
+setup_database() {
+    print_msg $BLUE "\n=== Setting up PostgreSQL Database ==="
+    
+    # Detect OS
+    OS="$(uname -s)"
+    
+    # Check if PostgreSQL is installed
+    if ! command -v psql &> /dev/null; then
+        print_msg $YELLOW "PostgreSQL is not installed."
+        install_choice=$(read_bool "Would you like instructions to install it?" "true")
+        
+        if [ "$install_choice" = "true" ]; then
+            case "$OS" in
+                Linux*)
+                    print_msg $GREEN "\n--- Ubuntu/Debian Installation ---"
+                    print_msg $YELLOW "Run the following commands:"
+                    print_msg $BLUE "sudo apt update"
+                    print_msg $BLUE "sudo apt install postgresql postgresql-contrib"
+                    print_msg $BLUE "sudo systemctl start postgresql"
+                    print_msg $BLUE "sudo systemctl enable postgresql"
+                    ;;
+                Darwin*)
+                    print_msg $GREEN "\n--- macOS Installation ---"
+                    print_msg $YELLOW "Using Homebrew:"
+                    print_msg $BLUE "brew install postgresql@15"
+                    print_msg $BLUE "brew services start postgresql@15"
+                    ;;
+                *)
+                    print_msg $RED "Unsupported OS: $OS"
+                    ;;
+            esac
+            print_msg $YELLOW "\nAfter installation, run this setup script again."
+            exit 0
+        fi
+    else
+        print_msg $GREEN "✓ PostgreSQL is installed"
+        
+        # Check if PostgreSQL is running
+        if ! pg_isready &> /dev/null; then
+            print_msg $YELLOW "PostgreSQL is not running."
+            start_choice=$(read_bool "Would you like to start it?" "true")
+            
+            if [ "$start_choice" = "true" ]; then
+                case "$OS" in
+                    Linux*)
+                        sudo systemctl start postgresql
+                        ;;
+                    Darwin*)
+                        brew services start postgresql
+                        ;;
+                esac
+                sleep 2
+                
+                if pg_isready &> /dev/null; then
+                    print_msg $GREEN "✓ PostgreSQL started successfully"
+                else
+                    print_msg $RED "Failed to start PostgreSQL. Please start it manually."
+                    exit 1
+                fi
+            fi
+        else
+            print_msg $GREEN "✓ PostgreSQL is running"
+        fi
+        
+        # Setup database and user
+        print_msg $BLUE "\n--- Database Configuration ---"
+        
+        # Get current user
+        CURRENT_USER=$(whoami)
+        
+        db_user=$(read_input "Database username" "$CURRENT_USER")
+        db_name=$(read_input "Database name" "tiktok_scraper")
+        db_password=$(read_input "Database password (leave empty for no password)" "" "true")
+        
+        print_msg $YELLOW "\nCreating database and user..."
+        
+        # Create user and database
+        if [ "$OS" = "Linux" ]; then
+            # On Linux, we need to use sudo -u postgres
+            sudo -u postgres psql <<EOF 2>/dev/null || true
+CREATE USER $db_user WITH PASSWORD '$db_password';
+ALTER USER $db_user CREATEDB;
+CREATE DATABASE $db_name OWNER $db_user;
+GRANT ALL PRIVILEGES ON DATABASE $db_name TO $db_user;
+EOF
+        else
+            # On macOS, use current user
+            psql postgres <<EOF 2>/dev/null || true
+CREATE USER $db_user WITH PASSWORD '$db_password';
+ALTER USER $db_user CREATEDB;
+CREATE DATABASE $db_name OWNER $db_user;
+GRANT ALL PRIVILEGES ON DATABASE $db_name TO $db_user;
+EOF
+        fi
+        
+        # Test connection
+        if PGPASSWORD=$db_password psql -U $db_user -d $db_name -c "SELECT 1;" &> /dev/null; then
+            print_msg $GREEN "✓ Database setup successful!"
+            
+            # Update config.toml if it exists
+            if [ -f "config.toml" ]; then
+                update_config=$(read_bool "Update config.toml with database settings?" "true")
+                if [ "$update_config" = "true" ]; then
+                    # Update database section in config.toml
+                    sed -i.bak -e "/\[database\]/,/\[.*\]/{
+                        s/enabled = .*/enabled = true/
+                        s/host = .*/host = \"localhost\"/
+                        s/port = .*/port = 5432/
+                        s/database = .*/database = \"$db_name\"/
+                        s/user = .*/user = \"$db_user\"/
+                        s/password = .*/password = \"$db_password\"/
+                    }" config.toml
+                    rm -f config.toml.bak
+                    print_msg $GREEN "✓ config.toml updated with database settings"
+                fi
+            fi
+            
+            # Run database migrations
+            if [ -f "database/migrate_json_to_postgres.py" ]; then
+                migrate_choice=$(read_bool "Run database migrations to create tables?" "true")
+                if [ "$migrate_choice" = "true" ]; then
+                    print_msg $YELLOW "Creating database tables..."
+                    python database/setup_database.py 2>/dev/null || {
+                        print_msg $YELLOW "setup_database.py not found, trying migration script..."
+                        python -c "from src.database_manager import DatabaseManager; db = DatabaseManager(host='localhost', database='$db_name', user='$db_user', password='$db_password'); print('Tables created successfully')" || print_msg $YELLOW "Manual table creation may be needed"
+                    }
+                fi
+            fi
+            
+        else
+            print_msg $YELLOW "Database created but connection test failed."
+            print_msg $YELLOW "You may need to configure pg_hba.conf for authentication."
+            print_msg $YELLOW "Location: /etc/postgresql/*/main/pg_hba.conf (Linux) or /usr/local/var/postgres/pg_hba.conf (macOS)"
+        fi
+    fi
+}
+
+# Function to setup Django server
+setup_django() {
+    print_msg $BLUE "\n=== Setting up Django Server ==="
+    
+    # Check if Django is installed
+    if ! python -c "import django" 2>/dev/null; then
+        print_msg $YELLOW "Django is not installed."
+        install_choice=$(read_bool "Install Django and dependencies?" "true")
+        
+        if [ "$install_choice" = "true" ]; then
+            print_msg $YELLOW "Installing Django dependencies..."
+            pip install django djangorestframework django-cors-headers psycopg2-binary
+            print_msg $GREEN "✓ Django dependencies installed"
+        else
+            print_msg $RED "Django is required for the server. Exiting."
+            exit 1
+        fi
+    else
+        print_msg $GREEN "✓ Django is installed"
+    fi
+    
+    # Configure Django settings
+    if [ -f "tiktok_scraper/settings.py" ]; then
+        print_msg $BLUE "\n--- Django Configuration ---"
+        
+        # Get database settings
+        db_user=$(read_input "Database username" "$(whoami)")
+        db_name=$(read_input "Database name" "tiktok_scraper")
+        db_password=$(read_input "Database password (leave empty for no password)" "" "true")
+        db_host=$(read_input "Database host" "localhost")
+        db_port=$(read_input "Database port" "5432")
+        
+        # Update Django settings
+        print_msg $YELLOW "Updating Django settings..."
+        
+        # Update database settings in Django
+        python -c "
+import re
+
+with open('tiktok_scraper/settings.py', 'r') as f:
+    content = f.read()
+
+# Update database settings
+content = re.sub(
+    r'\"NAME\": \".*?\"',
+    f'\"NAME\": \"$db_name\"',
+    content
+)
+content = re.sub(
+    r'\"USER\": \".*?\"',
+    f'\"USER\": \"$db_user\"',
+    content
+)
+content = re.sub(
+    r'\"PASSWORD\": \".*?\"',
+    f'\"PASSWORD\": \"$db_password\"',
+    content
+)
+content = re.sub(
+    r'\"HOST\": \".*?\"',
+    f'\"HOST\": \"$db_host\"',
+    content
+)
+content = re.sub(
+    r'\"PORT\": \".*?\"',
+    f'\"PORT\": \"$db_port\"',
+    content
+)
+
+with open('tiktok_scraper/settings.py', 'w') as f:
+    f.write(content)
+" || print_msg $YELLOW "Manual update of settings.py may be needed"
+        
+        print_msg $GREEN "✓ Django settings updated"
+        
+        # Run migrations
+        migrate_choice=$(read_bool "Run Django migrations?" "true")
+        if [ "$migrate_choice" = "true" ]; then
+            print_msg $YELLOW "Running Django migrations..."
+            python manage.py makemigrations
+            python manage.py migrate
+            print_msg $GREEN "✓ Migrations completed"
+        fi
+        
+        # Create superuser
+        superuser_choice=$(read_bool "Create Django superuser account?" "true")
+        if [ "$superuser_choice" = "true" ]; then
+            print_msg $YELLOW "Creating superuser..."
+            python manage.py createsuperuser
+        fi
+        
+        # Network configuration
+        print_msg $BLUE "\n--- Network Configuration ---"
+        network_choice=$(read_bool "Configure for network access (not just localhost)?" "true")
+        if [ "$network_choice" = "true" ]; then
+            print_msg $GREEN "✓ Server configured for network access"
+            print_msg $YELLOW "\nTo start the Django server with network access:"
+            print_msg $BLUE "python manage.py runserver 0.0.0.0:8000"
+            print_msg $YELLOW "\nOther devices can connect using your IP address:"
+            if command -v ip &> /dev/null; then
+                IP=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v 127.0.0.1 | head -1)
+            elif command -v ifconfig &> /dev/null; then
+                IP=$(ifconfig | grep "inet " | grep -v 127.0.0.1 | awk '{print $2}' | head -1)
+            else
+                IP="<your-ip-address>"
+            fi
+            print_msg $BLUE "http://$IP:8000"
+        else
+            print_msg $YELLOW "\nTo start the Django server (localhost only):"
+            print_msg $BLUE "python manage.py runserver"
+        fi
+        
+    else
+        print_msg $RED "Django project not found. Please ensure you're in the project directory."
+        exit 1
+    fi
+}
+
 # Function to create test config.toml
 create_test_config() {
     print_msg $BLUE "\n=== Setting up Test Configuration (tests/test_config.toml) ==="
@@ -274,7 +530,9 @@ print_msg $BLUE "\nWhich configuration files would you like to set up?"
 print_msg $YELLOW "1) Main config only (config.toml)"
 print_msg $YELLOW "2) Test config only (tests/test_config.toml)"
 print_msg $YELLOW "3) Both configs"
-echo -n "Enter your choice [1-3]: "
+print_msg $YELLOW "4) Database setup (PostgreSQL)"
+print_msg $YELLOW "5) Django server setup"
+echo -n "Enter your choice [1-5]: "
 read choice
 
 case "$choice" in
@@ -287,6 +545,12 @@ case "$choice" in
     3)
         create_main_config
         create_test_config
+        ;;
+    4)
+        setup_database
+        ;;
+    5)
+        setup_django
         ;;
     *)
         print_msg $RED "Invalid choice. Exiting."

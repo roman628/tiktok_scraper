@@ -7,9 +7,12 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 import json
+import logging
 
 from .models import QueuedURL, Video
 from .services import CollectorService, MLService
+
+logger = logging.getLogger(__name__)
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -25,6 +28,8 @@ class URLSubmitView(View):
             if not url:
                 return JsonResponse({'error': 'URL is required'}, status=400)
             
+            logger.info(f"📥 Received URL submission: {url}")
+            
             # Queue the URL
             queued_url = CollectorService.queue_url(url)
             
@@ -37,6 +42,7 @@ class URLSubmitView(View):
                 'id': queued_url.id
             })
         except Exception as e:
+            logger.error(f"Error processing URL submission: {e}")
             return JsonResponse({'error': str(e)}, status=500)
 
 
@@ -49,6 +55,8 @@ class BatchURLSubmitView(APIView):
         
         if not urls:
             return Response({'error': 'URLs list is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        logger.info(f"📥 Received batch URL submission: {len(urls)} URLs")
         
         # Queue all URLs
         queued_urls = CollectorService.queue_multiple_urls(urls)

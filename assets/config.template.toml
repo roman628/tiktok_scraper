@@ -109,3 +109,11 @@ max_connections = 10   # Maximum database connections in pool
 # Migration settings
 auto_migrate = false   # Automatically migrate existing JSON data to database on startup
 migration_batch_size = 100  # Number of records to migrate at once
+
+# Django-specific database settings
+# These settings are used by the Django server (manage.py runserver)
+# They can be different from the collector.py database settings above
+django_user = "postgres"      # Django database user (use "root" on some servers)
+django_password = ""          # Django database password (leave empty for no password)
+django_host = "localhost"     # Django database host
+django_port = 5432           # Django database port

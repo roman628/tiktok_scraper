@@ -11,9 +11,22 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 from pathlib import Path
+import os
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load config.toml
+config_path = BASE_DIR / 'config.toml'
+if config_path.exists():
+    with open(config_path, 'rb') as f:
+        config = tomllib.load(f)
+else:
+    config = {'database': {}}
 
 
 # Quick-start development settings - unsuitable for production
@@ -80,11 +93,11 @@ WSGI_APPLICATION = "tiktok_scraper.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": "tiktok_scraper",
-        "USER": "ethan",
-        "PASSWORD": "",
-        "HOST": "localhost",
-        "PORT": "5432",
+        "NAME": config.get('database', {}).get('database', 'tiktok_scraper'),
+        "USER": config.get('database', {}).get('django_user', 'postgres'),
+        "PASSWORD": config.get('database', {}).get('django_password', ''),
+        "HOST": config.get('database', {}).get('django_host', 'localhost'),
+        "PORT": str(config.get('database', {}).get('django_port', 5432)),
     }
 }
 
@@ -142,3 +155,43 @@ CORS_ALLOW_ALL_ORIGINS = True  # For development only
 TIKTOK_USE_WHISPER = True
 TIKTOK_AUDIO_ONLY = True
 TIKTOK_DEFAULT_WORKERS = 4
+
+# Logging Configuration
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '[{levelname}] {asctime} {name}: {message}',
+            'style': '{',
+            'datefmt': '%Y-%m-%d %H:%M:%S'
+        },
+        'simple': {
+            'format': '{levelname} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'level': 'INFO',
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose'
+        },
+    },
+    'loggers': {
+        'server': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'django': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+}
