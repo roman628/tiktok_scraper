@@ -219,7 +219,7 @@ def kill_browser_processes():
                 proc_name = proc_info['name'].lower()
                 
                 # Check if it's a browser process AND one of our children
-                if (any(browser in proc_name for browser in ['chromium', 'chrome', 'firefox', 'edge']) and
+                if (any(browser in proc_name for browser in ['chromium']) and
                     proc_info['pid'] in our_children):
                     
                     print(f"🧹 Cleaning up yt-dlp browser process: {proc_name} (PID: {proc_info['pid']})")

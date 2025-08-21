@@ -15,11 +15,10 @@ class ResourceManager:
     
     MEMORY_THRESHOLD_MB = 2000  # Trigger cleanup above this threshold
     BROWSER_PROCESSES = [
-        'chrome', 'chromium', 'chromedriver', 'google-chrome',
+        'chromium', 'chromedriver', 'google-chrome',
         'webkit', 'WebKitWebProcess', 'WebKitNetworkProcess', 
-        'firefox', 'geckodriver',
-        'playwright', 'pw-', 'ms-playwright',
-        'Microsoft Edge', 'msedge', 'msedgedriver'
+        'geckodriver',
+        'playwright', 'pw-', 'ms-playwright'
     ]
     
     def __init__(self):
