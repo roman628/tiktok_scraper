@@ -76,7 +76,7 @@ class DatabaseManager:
         self._initialize_pool(min_connections, max_connections)
         
         # Cache for duplicate detection
-        self.url_cache: Set[str] = set()
+        self.video_id_cache: Set[str] = set()
         self.cache_size_limit = 100000  # Limit cache size to avoid memory issues
         self.cache_initialized = False
         
@@ -121,19 +121,19 @@ class DatabaseManager:
     
     @retry_on_connection_error()
     def initialize_cache(self):
-        """Load existing URLs into cache for fast duplicate detection"""
+        """Load existing video IDs into cache for fast duplicate detection"""
         if self.cache_initialized:
             return
         
         try:
             with self.get_cursor() as cursor:
-                cursor.execute("SELECT url FROM videos")
-                urls = cursor.fetchall()
-                self.url_cache = {url[0] for url in urls}
+                cursor.execute("SELECT video_id FROM videos")
+                video_ids = cursor.fetchall()
+                self.video_id_cache = {vid[0] for vid in video_ids}
                 self.cache_initialized = True
-                logger.info(f"Loaded {len(self.url_cache)} URLs into cache")
+                logger.info(f"Loaded {len(self.video_id_cache)} video IDs into cache")
         except psycopg2.Error as e:
-            logger.error(f"Failed to initialize URL cache: {e}")
+            logger.error(f"Failed to initialize video ID cache: {e}")
             raise
     
     @retry_on_connection_error()
@@ -243,7 +243,7 @@ class DatabaseManager:
             SET whisper_transcription = EXCLUDED.whisper_transcription,
                 transcription_timestamp = EXCLUDED.transcription_timestamp
         """, (video_id, video_data.get('whisper_transcription'), 
-              video_data.get('transcription_timestamp')))
+              video_data.get('transcription_timestamp') or None))
     
     def _insert_comments(self, cursor, video_id: int, comments: List[Dict], extracted_at: str):
         """Insert comments for a video"""
@@ -283,9 +283,9 @@ class DatabaseManager:
         """, (
             video_id,
             video_data.get('comments_extracted', False),
-            video_data.get('comments_extracted_at'),
+            video_data.get('comments_extracted_at') or None,
             bool(video_data.get('whisper_transcription')),
-            video_data.get('transcription_timestamp')
+            video_data.get('transcription_timestamp') or None
         ))
     
     @retry_on_connection_error()
@@ -332,35 +332,47 @@ class DatabaseManager:
             logger.error(f"Batch insert failed: {e}")
             raise
     
-    def is_duplicate(self, url: str) -> bool:
+    def is_duplicate(self, url_or_video_id: str) -> bool:
         """
-        Check if URL already exists in database
+        Check if video already exists in database by video_id
         
         Args:
-            url: Video URL to check
+            url_or_video_id: TikTok URL or video ID to check
             
         Returns:
             True if duplicate, False otherwise
         """
-        if not url:
+        if not url_or_video_id:
             return False
+        
+        # Extract video_id from URL if needed
+        if 'tiktok.com' in url_or_video_id:
+            # Extract video ID from URL (last numeric part)
+            import re
+            match = re.search(r'/video/(\d+)', url_or_video_id)
+            if match:
+                video_id = match.group(1)
+            else:
+                return False
+        else:
+            video_id = url_or_video_id
         
         # Initialize cache if needed
         if not self.cache_initialized:
             self.initialize_cache()
         
         # Check cache first
-        if url in self.url_cache:
+        if video_id in self.video_id_cache:
             return True
         
         # Double-check database if not in cache
         try:
             with self.get_cursor() as cursor:
-                cursor.execute("SELECT 1 FROM videos WHERE url = %s LIMIT 1", (url,))
+                cursor.execute("SELECT 1 FROM videos WHERE video_id = %s LIMIT 1", (video_id,))
                 exists = cursor.fetchone() is not None
                 
-                if exists and len(self.url_cache) < self.cache_size_limit:
-                    self.url_cache.add(url)
+                if exists and len(self.video_id_cache) < self.cache_size_limit:
+                    self.video_id_cache.add(video_id)
                 
                 return exists
         except psycopg2.Error as e:
