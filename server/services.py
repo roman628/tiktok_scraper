@@ -4,6 +4,7 @@ import subprocess
 import os
 import json
 import logging
+import psutil
 from typing import List, Optional
 from django.conf import settings
 from .models import QueuedURL
@@ -13,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 class CollectorService:
     """Service to manage collector.py execution"""
+    
+    _collector_process = None  # Track the running collector process
     
     @staticmethod
     def queue_url(url: str) -> QueuedURL:
@@ -65,50 +68,81 @@ class CollectorService:
         return list(query.values_list('url', flat=True))
     
     @staticmethod
-    def trigger_processing(urls: Optional[List[str]] = None, workers: int = 1) -> subprocess.Popen:
+    def check_collector_status():
+        """Check and log collector status changes"""
+        if CollectorService._collector_process is not None:
+            poll_result = CollectorService._collector_process.poll()
+            if poll_result is not None:
+                # Process has finished
+                logger.info(f"✅ Collector process (PID: {CollectorService._collector_process.pid}) has finished with exit code: {poll_result}")
+                CollectorService._collector_process = None
+                return False
+        return CollectorService.is_collector_running()
+    
+    @staticmethod
+    def is_collector_running() -> bool:
         """
-        Trigger collector.py to process URLs.
+        Check if collector.py is currently running.
+        
+        Returns:
+            True if collector is running, False otherwise
+        """
+        if CollectorService._collector_process is None:
+            return False
+        
+        # Check if the process is still alive
+        if CollectorService._collector_process.poll() is not None:
+            # Process has terminated
+            CollectorService._collector_process = None
+            return False
+        
+        # Additionally check if the process exists in the system
+        try:
+            if psutil.pid_exists(CollectorService._collector_process.pid):
+                process = psutil.Process(CollectorService._collector_process.pid)
+                # Check if it's actually our collector.py
+                cmdline = ' '.join(process.cmdline())
+                if 'collector.py' in cmdline:
+                    return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+        
+        CollectorService._collector_process = None
+        return False
+    
+    @staticmethod
+    def trigger_processing(urls: Optional[List[str]] = None, workers: int = None) -> subprocess.Popen:
+        """
+        Trigger collector.py to process URLs from database queue.
+        Only starts if not already running.
         
         Args:
-            urls: Specific URLs to process (if None, processes all pending)
-            workers: Number of worker processes
+            urls: Not used - kept for compatibility
+            workers: Not used - uses config.toml settings
             
         Returns:
-            Subprocess instance
+            Subprocess instance or existing process
         """
-        # Get URLs if not provided
-        if urls is None:
-            urls = CollectorService.get_pending_urls()
+        # Check if collector is already running
+        if CollectorService.is_collector_running():
+            logger.info("📋 Collector already running with PID: %s - URL will be processed by existing collector", 
+                       CollectorService._collector_process.pid)
+            return CollectorService._collector_process
         
-        if not urls:
-            logger.info("No URLs to process")
+        # Check if there are pending URLs
+        pending_count = QueuedURL.objects.filter(status='pending').count()
+        if pending_count == 0:
+            logger.info("No pending URLs to process")
             return None
         
         # Log collector start
-        logger.info(f"🚀 Starting collector.py with {len(urls)} URL(s) and {workers} worker(s)")
-        logger.info(f"Processing URLs: {', '.join(urls[:3])}{'...' if len(urls) > 3 else ''}")
+        logger.info(f"🚀 Starting collector.py to process {pending_count} pending URL(s)")
         
-        # Mark URLs as processing
-        QueuedURL.objects.filter(url__in=urls).update(status='processing')
-        
-        # Build command
-        cmd = [
-            'python', 'collector.py',
-            '--url', ','.join(urls),
-            '--workers', str(workers)
-        ]
-        
-        # Add whisper and mp3 flags if configured
-        if getattr(settings, 'TIKTOK_USE_WHISPER', True):
-            cmd.append('--whisper')
-        if getattr(settings, 'TIKTOK_AUDIO_ONLY', True):
-            cmd.append('--mp3')
+        # Build command - no arguments, uses config.toml
+        cmd = ['python', 'collector.py']
         
         # Log full command
         logger.info(f"Command: {' '.join(cmd)}")
-        
-        # Since database is enabled, don't write to JSON
-        # The collector will read from config.toml and see database.enabled = true
         
         # Run collector.py in background
         process = subprocess.Popen(
@@ -117,6 +151,9 @@ class CollectorService:
             stderr=subprocess.PIPE,
             cwd=settings.BASE_DIR  # Run from project root
         )
+        
+        # Store the process reference
+        CollectorService._collector_process = process
         
         logger.info(f"Collector started with PID: {process.pid}")
         

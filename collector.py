@@ -804,31 +804,63 @@ async def main():
     # Database is now primary storage - no JSON output needed
     args.json_output = None
     
-    # Auto-discovery logic without overriding config
+    # Auto-discovery logic - check database queue first
     if 'url' not in cli_provided and 'from_file' not in cli_provided:
         if not args.url and not args.from_file:
-            # Check for urls.txt in order of preference
-            possible_files = ['data/urls.txt', 'urls.txt']
-            for file_path in possible_files:
-                if os.path.exists(file_path):
-                    args.from_file = file_path
-                    print(f"Auto-detected input file: {file_path}")
+            # Check database queue for pending URLs
+            from src.database_manager import DatabaseManager
+            
+            db_config = config.get('database', {})
+            if db_config.get('enabled', True):
+                try:
+                    db = DatabaseManager(
+                        host=db_config.get('host', 'localhost'),
+                        database=db_config.get('database', 'tiktok_scraper'),
+                        user=db_config.get('user', 'root'),
+                        password=db_config.get('password', ''),
+                        port=db_config.get('port', 5432)
+                    )
                     
-                    # Only set defaults if not in config AND not in CLI
-                    if 'mp3' not in cli_provided:
-                        # Check if audio_only is in config
-                        if not ('download' in config and 'audio_only' in config['download']):
-                            args.mp3 = True  # Default for auto-discovery
-                            print("  Applied auto-discovery default: mp3 = True")
-                    
-                    if 'whisper' not in cli_provided:
-                        # Check if use_whisper is in config
-                        if not ('download' in config and 'use_whisper' in config['download']):
-                            args.whisper = True  # Default for auto-discovery
-                            print("  Applied auto-discovery default: whisper = True")
-                    break
+                    # Get pending URLs from queued_urls table
+                    with db.get_cursor() as cursor:
+                        cursor.execute("""
+                            SELECT url FROM queued_urls 
+                            WHERE status = 'pending'
+                            ORDER BY added_at
+                        """)
+                        pending_urls = cursor.fetchall()
+                        
+                        if pending_urls:
+                            # Update status to processing
+                            url_list = [url[0] for url in pending_urls]
+                            cursor.execute("""
+                                UPDATE queued_urls 
+                                SET status = 'processing'
+                                WHERE url = ANY(%s)
+                            """, (url_list,))
+                            cursor.connection.commit()
+                            
+                            # Set URLs for processing
+                            args.url = ','.join(url_list)
+                            print(f"📋 Found {len(url_list)} pending URL(s) in database queue")
+                            
+                            # Apply defaults if not in config
+                            if 'mp3' not in cli_provided:
+                                if not ('download' in config and 'audio_only' in config['download']):
+                                    args.mp3 = True
+                                    
+                            if 'whisper' not in cli_provided:
+                                if not ('download' in config and 'use_whisper' in config['download']):
+                                    args.whisper = True
+                        else:
+                            print("No pending URLs in database queue")
+                            return
+                            
+                except Exception as e:
+                    print(f"Error connecting to database queue: {e}")
+                    return
             else:
-                print("Error: Provide --url or --from-file (or set default_urls_file in config.toml)")
+                print("Database is disabled in config.toml")
                 return
     
     # Initialize processor with config
@@ -890,6 +922,39 @@ async def main():
     try:
         # Always use worker processes (even if just 1)
         await processor.process_urls(urls, download_kwargs)
+        
+        # Update URL statuses in database queue if we're using it
+        if 'url' not in cli_provided and 'from_file' not in cli_provided:
+            db_config = config.get('database', {})
+            if db_config.get('enabled', True):
+                try:
+                    db = DatabaseManager(
+                        host=db_config.get('host', 'localhost'),
+                        database=db_config.get('database', 'tiktok_scraper'),
+                        user=db_config.get('user', 'ethan'),
+                        password=db_config.get('password', ''),
+                        port=db_config.get('port', 5432)
+                    )
+                    
+                    # Mark processed URLs as completed
+                    with db.get_cursor() as cursor:
+                        for url in urls:
+                            if url not in processor.state.failed_urls:
+                                cursor.execute("""
+                                    UPDATE queued_urls 
+                                    SET status = 'completed', processed_at = NOW()
+                                    WHERE url = %s
+                                """, (url,))
+                            else:
+                                cursor.execute("""
+                                    UPDATE queued_urls 
+                                    SET status = 'failed', error_message = 'Processing failed'
+                                    WHERE url = %s
+                                """, (url,))
+                        cursor.connection.commit()
+                        print(f"✅ Updated database queue status for {len(urls)} URL(s)")
+                except Exception as e:
+                    print(f"Warning: Could not update database queue status: {e}")
         
         # Clean up
         # Legacy auto-clean removed - using database now

@@ -33,8 +33,8 @@ class URLSubmitView(View):
             # Queue the URL
             queued_url = CollectorService.queue_url(url)
             
-            # Trigger processing in background
-            CollectorService.trigger_processing([url])
+            # Trigger processing if collector not already running
+            CollectorService.trigger_processing()
             
             return JsonResponse({
                 'status': 'queued',
@@ -61,9 +61,8 @@ class BatchURLSubmitView(APIView):
         # Queue all URLs
         queued_urls = CollectorService.queue_multiple_urls(urls)
         
-        # Trigger batch processing
-        workers = request.data.get('workers', 4)
-        CollectorService.trigger_processing(urls, workers)
+        # Trigger processing if collector not already running
+        CollectorService.trigger_processing()
         
         return Response({
             'status': 'queued',
