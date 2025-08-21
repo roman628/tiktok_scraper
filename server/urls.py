@@ -1,4 +1,4 @@
-from django.urls import path
+from django.urls import path, re_path
 from . import views
 
 urlpatterns = [
@@ -14,7 +14,7 @@ urlpatterns = [
     path('api/videos/', views.VideoListView.as_view(), name='video-list'),
     
     # ML prediction (replaces ml/api.py)
-    path('predict/', views.MLPredictView.as_view(), name='ml-predict'),
+    re_path(r'^predict/?', views.MLPredictView.as_view(), name='ml-predict'),
     
     # Health check
     path('health/', views.HealthCheckView.as_view(), name='health-check-legacy'),
