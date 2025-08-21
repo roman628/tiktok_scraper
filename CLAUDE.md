@@ -153,6 +153,102 @@ The system now uses PostgreSQL as primary storage (enabled by default in config.
 - **Concurrent writes** from multiple workers without file locking
 - **ACID transactions** ensure data integrity
 
+### Database Schema
+
+#### videos table
+Primary table storing video metadata:
+- `id` (SERIAL PRIMARY KEY) - Auto-incrementing integer ID
+- `video_id` (VARCHAR(100)) - TikTok video ID string (e.g., "7532447162072894775")
+- `url` (TEXT) - Full TikTok URL
+- `title` (TEXT) - Video title
+- `description` (TEXT) - Video description
+- `uploader` (VARCHAR(255)) - Username
+- `uploader_id` (VARCHAR(255)) - User ID
+- `uploader_url` (TEXT) - User profile URL
+- `view_count` (BIGINT) - View count
+- `like_count` (BIGINT) - Like count
+- `comment_count` (BIGINT) - Comment count
+- `repost_count` (BIGINT) - Repost count
+- `save_count` (BIGINT) - Save count
+- `share_count` (BIGINT) - Share count
+- `upload_date` (DATE) - Original upload date
+- `timestamp` (BIGINT) - Unix timestamp
+- `duration` (INTEGER) - Duration in seconds
+- `width` (INTEGER) - Video width
+- `height` (INTEGER) - Video height
+- `fps` (INTEGER) - Frames per second
+- `filesize` (BIGINT) - File size in bytes
+- `format` (TEXT) - Video format string
+- `downloaded_at` (TIMESTAMP) - When we downloaded it
+- `downloaded_with` (TEXT) - Scraper version info
+- `platform` (VARCHAR(50)) - OS platform
+- `created_at` (TIMESTAMP) - Database insertion time
+
+#### transcriptions table
+Stores Whisper AI transcriptions:
+- `id` (SERIAL PRIMARY KEY) - Auto-incrementing ID
+- `video_id` (INTEGER REFERENCES videos(id)) - **Links to videos.id NOT videos.video_id!**
+- `whisper_transcription` (TEXT) - Full transcription text
+- `transcription_timestamp` (TIMESTAMP) - When transcribed
+- `model_used` (VARCHAR(50)) - Whisper model name
+
+#### comments table
+Stores video comments:
+- `id` (SERIAL PRIMARY KEY) - Auto-incrementing ID
+- `video_id` (INTEGER REFERENCES videos(id)) - **Links to videos.id NOT videos.video_id!**
+- `comment_id` (VARCHAR(100)) - TikTok comment ID
+- `username` (VARCHAR(255)) - Commenter username
+- `display_name` (VARCHAR(255)) - Display name
+- `comment_text` (TEXT) - Comment content
+- `like_count` (INTEGER) - Comment likes
+- `timestamp` (TIMESTAMP) - Comment timestamp
+- `is_top_comment` (BOOLEAN) - Top comment flag
+- `extracted_at` (TIMESTAMP) - When extracted
+
+#### hashtags table
+Normalized hashtag storage:
+- `id` (SERIAL PRIMARY KEY) - Auto-incrementing ID
+- `tag` (VARCHAR(255) UNIQUE) - Hashtag text
+
+#### video_hashtags table
+Many-to-many relationship:
+- `video_id` (INTEGER REFERENCES videos(id)) - **Links to videos.id**
+- `hashtag_id` (INTEGER REFERENCES hashtags(id))
+
+#### processing_status table
+Tracks processing status:
+- `video_id` (INTEGER REFERENCES videos(id)) - **Links to videos.id**
+- `comments_extracted` (BOOLEAN) - Comments extraction flag
+- `comments_extracted_at` (TIMESTAMP) - When comments extracted
+- `transcription_completed` (BOOLEAN) - Transcription flag
+- `transcription_completed_at` (TIMESTAMP) - When transcribed
+- `created_at` (TIMESTAMP) - Creation time
+- `updated_at` (TIMESTAMP) - Last update
+
+#### queued_urls table
+URL processing queue:
+- `id` (SERIAL PRIMARY KEY) - Auto-incrementing ID
+- `url` (TEXT UNIQUE) - TikTok URL to process
+- `status` (VARCHAR(20)) - 'pending', 'processing', 'completed', 'failed'
+- `added_at` (TIMESTAMP) - When added to queue
+- `processed_at` (TIMESTAMP) - When processed
+- `error_message` (TEXT) - Error details if failed
+- `retry_count` (INTEGER DEFAULT 0) - Retry attempts
+
+### Important JOIN Relationships
+
+**CRITICAL**: When joining tables, remember that foreign keys reference `videos.id` (INTEGER), not `videos.video_id` (VARCHAR):
+
+```sql
+-- CORRECT: Join on videos.id
+SELECT v.video_id, v.url, t.whisper_transcription
+FROM videos v
+LEFT JOIN transcriptions t ON v.id = t.video_id
+
+-- WRONG: Don't join on videos.video_id
+-- This won't work: ON v.video_id = t.video_id
+```
+
 ### Database Operations
 ```bash
 # Check database statistics
