@@ -816,7 +816,7 @@ async def main():
                     db = DatabaseManager(
                         host=db_config.get('host', 'localhost'),
                         database=db_config.get('database', 'tiktok_scraper'),
-                        user=db_config.get('user', 'root'),
+                        user=db_config.get('user'),  # Use config value, no default
                         password=db_config.get('password', ''),
                         port=db_config.get('port', 5432)
                     )
@@ -931,7 +931,7 @@ async def main():
                     db = DatabaseManager(
                         host=db_config.get('host', 'localhost'),
                         database=db_config.get('database', 'tiktok_scraper'),
-                        user=db_config.get('user', 'ethan'),
+                        user=db_config.get('user'),  # Use config value, no default
                         password=db_config.get('password', ''),
                         port=db_config.get('port', 5432)
                     )
