@@ -977,9 +977,10 @@ async def main():
                 print(f"Error in processing loop: {e}")
                 await asyncio.sleep(check_interval)
         
-        # Mark collector as stopped
+        # Mark collector as stopped and notify server
         if db:
             try:
+                # Update database status
                 with db.get_cursor() as cursor:
                     cursor.execute("""
                         UPDATE collector_status
@@ -988,6 +989,43 @@ async def main():
                     """)
                     cursor.connection.commit()
                 print("\n✅ Collector status updated to 'stopped'")
+                
+                # Get stats for notification
+                with db.get_cursor() as cursor:
+                    cursor.execute("""
+                        SELECT started_at, stopped_at, urls_processed
+                        FROM collector_status
+                        WHERE id = 1
+                    """)
+                    result = cursor.fetchone()
+                    if result:
+                        started_at, stopped_at, urls_processed = result
+                        
+                        # Send completion notification to server
+                        try:
+                            import requests
+                            from datetime import datetime
+                            
+                            notification_data = {
+                                'urls_processed': urls_processed or 0,
+                                'started_at': started_at.isoformat() if started_at else None,
+                                'stopped_at': stopped_at.isoformat() if stopped_at else datetime.now().isoformat(),
+                                'reason': 'idle_timeout' if no_urls_count >= max_idle_iterations else 'completed'
+                            }
+                            
+                            response = requests.post(
+                                'http://localhost:8000/api/collector-complete/',
+                                json=notification_data,
+                                timeout=5
+                            )
+                            
+                            if response.status_code == 200:
+                                print("📨 Server notified of collector completion")
+                            else:
+                                print(f"⚠️ Could not notify server: {response.status_code}")
+                        except Exception as e:
+                            print(f"⚠️ Could not send completion notification: {e}")
+                
             except Exception as e:
                 print(f"Warning: Could not update collector status: {e}")
         

@@ -4,36 +4,37 @@ from django.utils import timezone
 
 class Video(models.Model):
     """Django model matching existing PostgreSQL videos table"""
+    id = models.AutoField(primary_key=True)
     video_id = models.CharField(max_length=100, unique=True)
     url = models.TextField(unique=True)
     title = models.TextField(blank=True, null=True)
     description = models.TextField(blank=True, null=True)
-    duration = models.IntegerField(null=True)
+    duration = models.IntegerField(null=True, blank=True)
     uploader = models.CharField(max_length=255, blank=True, null=True)
     uploader_id = models.CharField(max_length=100, blank=True, null=True)
     uploader_url = models.TextField(blank=True, null=True)
-    view_count = models.BigIntegerField(null=True)
-    like_count = models.BigIntegerField(null=True)
-    comment_count = models.BigIntegerField(null=True)
-    repost_count = models.BigIntegerField(null=True)
-    save_count = models.BigIntegerField(null=True)
-    share_count = models.BigIntegerField(null=True)
-    upload_date = models.DateField(null=True)
-    timestamp = models.BigIntegerField(null=True)
-    width = models.IntegerField(null=True)
-    height = models.IntegerField(null=True)
-    fps = models.IntegerField(null=True)
-    filesize = models.BigIntegerField(null=True)
+    view_count = models.BigIntegerField(null=True, blank=True)
+    like_count = models.BigIntegerField(null=True, blank=True)
+    comment_count = models.BigIntegerField(null=True, blank=True)
+    repost_count = models.BigIntegerField(null=True, blank=True)
+    save_count = models.BigIntegerField(null=True, blank=True)
+    share_count = models.BigIntegerField(null=True, blank=True)
+    upload_date = models.DateField(null=True, blank=True)
+    timestamp = models.BigIntegerField(null=True, blank=True)
+    width = models.IntegerField(null=True, blank=True)
+    height = models.IntegerField(null=True, blank=True)
+    fps = models.IntegerField(null=True, blank=True)
+    filesize = models.BigIntegerField(null=True, blank=True)
     format = models.CharField(max_length=50, blank=True, null=True)
-    downloaded_at = models.DateTimeField(null=True)
+    downloaded_at = models.DateTimeField(null=True, blank=True)
     downloaded_with = models.CharField(max_length=100, blank=True, null=True)
     platform = models.CharField(max_length=50, blank=True, null=True)
-    created_at = models.DateTimeField(default=timezone.now)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'videos'  # Use existing table
-        managed = False  # Don't create migrations initially
+        managed = False  # Don't create migrations for existing table
 
     def __str__(self):
         return f"{self.title or self.video_id}"
@@ -59,3 +60,61 @@ class QueuedURL(models.Model):
 
     def __str__(self):
         return f"{self.url} ({self.status})"
+
+
+class CollectorRun(models.Model):
+    """Track collector runs for dashboard statistics"""
+    started_at = models.DateTimeField(auto_now_add=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=[
+        ('running', 'Running'),
+        ('completed', 'Completed'),
+        ('failed', 'Failed'),
+        ('stopped', 'Stopped')
+    ], default='running')
+    urls_processed = models.IntegerField(default=0)
+    urls_failed = models.IntegerField(default=0)
+    error_message = models.TextField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'collector_runs'
+        ordering = ['-started_at']
+
+    def __str__(self):
+        return f"Run {self.started_at.strftime('%Y-%m-%d %H:%M')} ({self.status})"
+
+
+class MLTrainingRun(models.Model):
+    """Track ML model training runs"""
+    trained_at = models.DateTimeField(auto_now_add=True)
+    model_name = models.CharField(max_length=100)
+    accuracy = models.FloatField(null=True, blank=True)
+    training_samples = models.IntegerField(null=True, blank=True)
+    model_path = models.CharField(max_length=255, blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+
+    class Meta:
+        db_table = 'ml_training_runs'
+        ordering = ['-trained_at']
+
+    def __str__(self):
+        return f"Training {self.trained_at.strftime('%Y-%m-%d %H:%M')} - {self.model_name}"
+
+
+class Transcription(models.Model):
+    """Django model for transcriptions table"""
+    id = models.AutoField(primary_key=True)
+    video = models.ForeignKey(Video, on_delete=models.CASCADE, db_column='video_id', related_name='transcriptions')
+    whisper_transcription = models.TextField(blank=True, null=True)
+    transcription_timestamp = models.DateTimeField(null=True, blank=True)
+    model_used = models.CharField(max_length=50, blank=True, null=True)
+    language = models.CharField(max_length=10, blank=True, null=True)
+    confidence = models.FloatField(null=True, blank=True)
+    created_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'transcriptions'
+        managed = False  # Don't create migrations for existing table
+
+    def __str__(self):
+        return f"Transcription for {self.video.video_id}"

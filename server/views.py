@@ -8,8 +8,11 @@ from rest_framework.response import Response
 from rest_framework import status
 import json
 import logging
+import os
+import subprocess
+from datetime import datetime
 
-from .models import QueuedURL, Video
+from .models import QueuedURL, Video, CollectorRun, MLTrainingRun
 from .services import CollectorService, MLService
 
 logger = logging.getLogger(__name__)
@@ -228,3 +231,95 @@ class UpdateTokenView(View):
             })
         except Exception as e:
             return JsonResponse({'error': str(e)}, status=500)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class CollectorCompleteView(View):
+    """API endpoint to notify when collector finishes processing"""
+    
+    def post(self, request):
+        """Collector completion notification"""
+        try:
+            data = json.loads(request.body)
+            urls_processed = data.get('urls_processed', 0)
+            started_at = data.get('started_at')
+            stopped_at = data.get('stopped_at', datetime.now().isoformat())
+            reason = data.get('reason', 'idle_timeout')
+            
+            # Log collector completion with clear visual indicator
+            logger.info("=" * 60)
+            logger.info("🎉 COLLECTOR COMPLETED PROCESSING")
+            logger.info("=" * 60)
+            logger.info(f"📊 Total URLs Processed: {urls_processed}")
+            logger.info(f"⏱️  Started: {started_at}")
+            logger.info(f"⏱️  Stopped: {stopped_at}")
+            logger.info(f"📝 Reason: {reason}")
+            
+            # Check remaining queue
+            pending_count = QueuedURL.objects.filter(status='pending').count()
+            if pending_count > 0:
+                logger.info(f"⚠️  {pending_count} URLs still pending in queue")
+            else:
+                logger.info("✅ All URLs in queue have been processed!")
+            
+            logger.info("=" * 60)
+            
+            # Update collector status in services
+            CollectorService._collector_process = None
+            
+            return JsonResponse({
+                'status': 'acknowledged',
+                'pending_urls': pending_count
+            })
+        except Exception as e:
+            logger.error(f"Error processing collector completion: {e}")
+            return JsonResponse({'error': str(e)}, status=500)
+
+
+def dashboard_view(request):
+    """Dashboard view showing database statistics"""
+    
+    # Check if collector is running
+    collector_running = False
+    try:
+        # Check if collector.py process is running
+        result = subprocess.run(['pgrep', '-f', 'collector.py'], capture_output=True, text=True)
+        collector_running = bool(result.stdout.strip())
+    except:
+        pass
+    
+    # Get last collector run
+    last_collector_run = CollectorRun.objects.filter(status__in=['completed', 'failed', 'stopped']).first()
+    last_collector_date = last_collector_run.ended_at if last_collector_run else None
+    
+    # Get last ML training run
+    last_ml_run = MLTrainingRun.objects.first()
+    last_ml_date = last_ml_run.trained_at if last_ml_run else None
+    
+    # Get video count
+    video_count = Video.objects.count()
+    
+    # Get URL count
+    url_count = QueuedURL.objects.count()
+    
+    # Get additional statistics
+    pending_urls = QueuedURL.objects.filter(status='pending').count()
+    completed_urls = QueuedURL.objects.filter(status='completed').count()
+    failed_urls = QueuedURL.objects.filter(status='failed').count()
+    
+    # Get recent videos
+    recent_videos = Video.objects.order_by('-downloaded_at')[:10]
+    
+    context = {
+        'collector_running': collector_running,
+        'last_collector_date': last_collector_date,
+        'last_ml_date': last_ml_date,
+        'video_count': video_count,
+        'url_count': url_count,
+        'pending_urls': pending_urls,
+        'completed_urls': completed_urls,
+        'failed_urls': failed_urls,
+        'recent_videos': recent_videos,
+    }
+    
+    return render(request, 'dashboard.html', context)

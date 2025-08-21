@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TikTok Scraper Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5rem;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.15);
+        }
+        
+        .stat-label {
+            color: #666;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+        
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+        
+        .status-running {
+            background-color: #10b981;
+        }
+        
+        .status-stopped {
+            background-color: #ef4444;
+        }
+        
+        @keyframes pulse {
+            0% {
+                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+            }
+            70% {
+                box-shadow: 0 0 0 10px rgba(16, 185, 129, 0);
+            }
+            100% {
+                box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+            }
+        }
+        
+        .date-value {
+            font-size: 1.2rem;
+            color: #4f46e5;
+        }
+        
+        .no-data {
+            color: #999;
+            font-style: italic;
+        }
+        
+        .url-stats {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            margin-bottom: 30px;
+        }
+        
+        .url-stats h2 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        
+        .url-breakdown {
+            display: flex;
+            justify-content: space-around;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        
+        .url-stat {
+            text-align: center;
+        }
+        
+        .url-count {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #4f46e5;
+        }
+        
+        .url-label {
+            color: #666;
+            font-size: 0.9rem;
+            margin-top: 5px;
+        }
+        
+        .recent-videos {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+        
+        .recent-videos h2 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        
+        .video-list {
+            list-style: none;
+        }
+        
+        .video-item {
+            padding: 12px;
+            border-bottom: 1px solid #e5e7eb;
+            transition: background-color 0.2s ease;
+        }
+        
+        .video-item:hover {
+            background-color: #f9fafb;
+        }
+        
+        .video-item:last-child {
+            border-bottom: none;
+        }
+        
+        .video-title {
+            color: #333;
+            font-weight: 500;
+            margin-bottom: 5px;
+        }
+        
+        .video-meta {
+            color: #666;
+            font-size: 0.85rem;
+        }
+        
+        .video-stats {
+            display: inline-flex;
+            gap: 15px;
+            margin-top: 5px;
+        }
+        
+        .video-stat {
+            color: #999;
+            font-size: 0.85rem;
+        }
+        
+        .admin-link {
+            display: inline-block;
+            background: white;
+            color: #4f46e5;
+            padding: 12px 24px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 500;
+            margin-top: 20px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        
+        .admin-link:hover {
+            background: #4f46e5;
+            color: white;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.15);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎵 TikTok Scraper Dashboard</h1>
+        
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Collector Status</div>
+                <div class="stat-value">
+                    {% if collector_running %}
+                        <span class="status-indicator status-running"></span>Running
+                    {% else %}
+                        <span class="status-indicator status-stopped"></span>Stopped
+                    {% endif %}
+                </div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-label">Last Collector Run</div>
+                <div class="stat-value date-value">
+                    {% if last_collector_date %}
+                        {{ last_collector_date|date:"M d, H:i" }}
+                    {% else %}
+                        <span class="no-data">Never</span>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-label">Last ML Training</div>
+                <div class="stat-value date-value">
+                    {% if last_ml_date %}
+                        {{ last_ml_date|date:"M d, H:i" }}
+                    {% else %}
+                        <span class="no-data">Never</span>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-label">Total Videos</div>
+                <div class="stat-value">{{ video_count|floatformat:0 }}</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-label">Total URLs Collected</div>
+                <div class="stat-value">{{ url_count|floatformat:0 }}</div>
+            </div>
+        </div>
+        
+        <div class="url-stats">
+            <h2>📊 URL Processing Status</h2>
+            <div class="url-breakdown">
+                <div class="url-stat">
+                    <div class="url-count">{{ pending_urls }}</div>
+                    <div class="url-label">Pending</div>
+                </div>
+                <div class="url-stat">
+                    <div class="url-count">{{ completed_urls }}</div>
+                    <div class="url-label">Completed</div>
+                </div>
+                <div class="url-stat">
+                    <div class="url-count">{{ failed_urls }}</div>
+                    <div class="url-label">Failed</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="recent-videos">
+            <h2>🎬 Recent Videos</h2>
+            {% if recent_videos %}
+                <ul class="video-list">
+                    {% for video in recent_videos %}
+                        <li class="video-item">
+                            <div class="video-title">
+                                {{ video.title|default:video.video_id|truncatechars:80 }}
+                            </div>
+                            <div class="video-meta">
+                                By {{ video.uploader|default:"Unknown" }} • 
+                                Downloaded {{ video.downloaded_at|date:"M d, H:i" }}
+                            </div>
+                            <div class="video-stats">
+                                <span class="video-stat">👁 {{ video.view_count|default:0|floatformat:0 }} views</span>
+                                <span class="video-stat">❤️ {{ video.like_count|default:0|floatformat:0 }} likes</span>
+                                <span class="video-stat">💬 {{ video.comment_count|default:0|floatformat:0 }} comments</span>
+                            </div>
+                        </li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                <p class="no-data">No videos downloaded yet</p>
+            {% endif %}
+        </div>
+        
+        <a href="/admin/" class="admin-link">Go to Admin Panel →</a>
+    </div>
+</body>
+</html>
