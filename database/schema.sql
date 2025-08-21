@@ -517,8 +517,9 @@ JOIN silver.videos v ON v.video_id = f.video_id
 LEFT JOIN silver.transcriptions t ON t.video_id = v.id
 WHERE f.has_transcript = true;
 
--- Create index on materialized view
-CREATE INDEX IF NOT EXISTS idx_ml_training_view_video_id ON gold.ml_training_view(video_id);
+-- Create unique index on materialized view for concurrent refresh
+DROP INDEX IF EXISTS gold.idx_ml_training_view_video_id;
+CREATE UNIQUE INDEX idx_ml_training_view_video_id ON gold.ml_training_view(video_id);
 
 -- Function to refresh materialized view
 CREATE OR REPLACE FUNCTION refresh_ml_training_view()

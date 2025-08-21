@@ -17,6 +17,7 @@ urlpatterns = [
     path('api/predict/', views.MLPredictView.as_view(), name='ml-predict'),
     
     # Health check
+    path('health/', views.HealthCheckView.as_view(), name='health-check-legacy'),
     path('api/health/', views.HealthCheckView.as_view(), name='health-check'),
     
     # MS_TOKEN update

@@ -589,8 +589,7 @@ print_msg $YELLOW "2) Test config only (tests/test_config.toml)"
 print_msg $YELLOW "3) Both configs"
 print_msg $YELLOW "4) Database setup (PostgreSQL)"
 print_msg $YELLOW "5) Django server setup"
-echo -n "Enter your choice [1-5]: "
-read choice
+read -p "Enter your choice [1-5]: " choice
 
 case "$choice" in
     1)
