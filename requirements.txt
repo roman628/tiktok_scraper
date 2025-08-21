@@ -37,3 +37,6 @@ psutil>=5.9.0
 # Configuration loading
 toml>=0.10.2  # For configuration files
 tomli>=2.0.0; python_version < '3.11'  # For Python < 3.11 compatibility
+
+# Rich terminal UI
+rich>=13.0.0  # For enhanced progress display

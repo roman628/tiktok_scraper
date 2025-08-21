@@ -32,6 +32,8 @@ from src.data_manager import DataManager
 from src.video_extractor import VideoExtractor, load_whisper_model
 from src.comment_extractor import CommentExtractor
 from src.transcript_extractor import TranscriptExtractor
+from src.display_manager import create_display
+from src.worker_progress import WorkerProgress
 
 # For compatibility with existing code
 from src.video_extractor import VideoExtractor
@@ -281,8 +283,10 @@ class MultiprocessCoordinator:
         self.shared_state = self.manager.dict()
         self.url_queue = self.manager.Queue()
         self.result_queue = self.manager.Queue()
+        self.display_queue = self.manager.Queue()  # For display updates
         self.shutdown_event = self.manager.Event()
         self.whisper_config = None
+        self.display_manager = None
         
         # Setup Whisper configuration
         if args.whisper:
@@ -314,20 +318,46 @@ class MultiprocessCoordinator:
         self.shared_state['processed'] = 0
         self.shared_state['failed'] = 0
         
+        # Determine display mode based on args
+        display_mode = getattr(self.args, 'display_mode', 'auto')
+        raw_log_path = None
+        if getattr(self.args, 'raw_log', False):
+            raw_log_path = f"processing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        
+        # Create display manager
+        self.display_manager = create_display(
+            self.num_workers, 
+            len(urls),
+            mode=display_mode,
+            raw_log_path=raw_log_path
+        )
+        
         # Add URLs to queue
         for url in urls:
             self.url_queue.put(url)
         
+        # Distribute URLs evenly to workers for progress tracking
+        base_urls_per_worker = len(urls) // self.num_workers
+        extra_urls = len(urls) % self.num_workers
+        
+        # Start display
+        self.display_manager.start()
+        
         # Start worker processes
         workers = []
         for i in range(self.num_workers):
+            # Calculate URLs for this worker - distribute evenly
+            worker_url_count = base_urls_per_worker + (1 if i < extra_urls else 0)
+            
             worker = mp.Process(
                 target=worker_process,
-                args=(i, self.url_queue, self.result_queue, self.shutdown_event,
-                     self.args, download_kwargs, self.ms_token, self.whisper_config)
+                args=(i, self.url_queue, self.result_queue, self.display_queue, 
+                     self.shutdown_event, self.args, download_kwargs, self.ms_token, 
+                     self.whisper_config, worker_url_count)
             )
             worker.start()
             workers.append(worker)
+            url_start_idx += worker_url_count
         
         # Collect results
         data_manager = DataManager(master_file)
@@ -335,12 +365,23 @@ class MultiprocessCoordinator:
         
         try:
             while processed_count < len(urls) and not self.shutdown_event.is_set():
+                # Check for display updates (non-blocking)
                 try:
-                    result = self.result_queue.get(timeout=0.5)  # Shorter timeout for responsive shutdown
+                    while True:
+                        display_update = self.display_queue.get_nowait()
+                        self.display_manager.process_update(display_update)
+                except queue.Empty:
+                    pass
+                
+                # Update display
+                self.display_manager.update()
+                
+                # Check for results
+                try:
+                    result = self.result_queue.get(timeout=0.1)  # Shorter timeout for display updates
                     
                     # Check for sentinel value indicating worker shutdown
                     if result is None:
-                        print("Received worker shutdown signal")
                         continue
                     
                     if result and result.get('success'):
@@ -354,19 +395,13 @@ class MultiprocessCoordinator:
                                 URLProcessor.remove_url_from_file(url, source_file)
                         self.shared_state['failed'] += 1
                     processed_count += 1
-                    
-                    # Progress update
-                    if processed_count % 10 == 0:
-                        print(f"Progress: {processed_count}/{len(urls)} URLs processed")
                         
                 except queue.Empty:
                     # Check shutdown status during timeout
                     if self.shutdown_event.is_set():
-                        print("Shutdown requested during queue processing")
                         break
                     continue
                 except Exception as e:
-                    print(f"Error processing result: {e}")
                     if self.shutdown_event.is_set():
                         break
                     continue
@@ -374,6 +409,10 @@ class MultiprocessCoordinator:
         except KeyboardInterrupt:
             print("\nShutting down workers gracefully...")
             self.shutdown_event.set()
+        finally:
+            # Stop display
+            if self.display_manager:
+                self.display_manager.stop()
             
             # Send poison pills to wake up any blocking queue operations
             for _ in range(self.num_workers):
@@ -430,11 +469,15 @@ def load_cached_whisper_model(model_config: Dict[str, Any]):
         print(f"Failed to load Whisper model: {e}")
         return None
 
-def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
-                  args, download_kwargs: Dict[str, Any], ms_token: Optional[str],
-                  whisper_config: Dict[str, Any] = None):
+def worker_process(worker_id: int, url_queue, result_queue, display_queue, 
+                  shutdown_event, args, download_kwargs: Dict[str, Any], 
+                  ms_token: Optional[str], whisper_config: Dict[str, Any] = None,
+                  total_urls: int = 0):
     """Worker process for parallel data collection."""
-    print(f"Worker {worker_id} started")
+    # Initialize progress tracker
+    progress = WorkerProgress(worker_id, display_queue, total_urls)
+    progress.send_status('initializing')
+    
     silent = False  # Set silent flag for logging
     
     # Import shutdown handler for worker
@@ -464,16 +507,19 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
     whisper_model = None
     
     if args.whisper:
+        progress.send_log('Loading Whisper model...', 'info')
         if whisper_config:
             # Load local model for this worker
             whisper_model = load_cached_whisper_model(whisper_config)
             if whisper_model:
-                print(f"[Worker {worker_id}] Loaded Whisper model on {whisper_config.get('device', 'cpu').upper()}")
+                progress.send_log(f"Loaded Whisper model on {whisper_config.get('device', 'cpu').upper()}", 'success')
             else:
-                print(f"[Worker {worker_id}] Failed to load Whisper model")
+                progress.send_log('Failed to load Whisper model', 'error')
         else:
             # Fallback
             whisper_model, _ = load_whisper_model(force_cpu=args.force_cpu)
+    
+    progress.send_status('idle')  # Ready to process
     
     # Process URLs with shutdown checking
     try:
@@ -499,7 +545,10 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
                 break
             
             # Process URL with shutdown event passed
-            print(f"[Worker {worker_id}] Processing: {url}")
+            progress.start_url(url)
+            
+            # Start download with progress tracking
+            progress.start_download()
             
             result = video_extractor.download_single_video(
                 url,
@@ -507,7 +556,8 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
                 use_whisper=args.whisper,
                 whisper_model=whisper_model,
                 whisper_device=whisper_config.get('device', 'cpu').upper() if whisper_config else 'CPU',
-                shutdown_event=shutdown_event  # Pass shutdown event
+                shutdown_event=shutdown_event,  # Pass shutdown event
+                progress_callback=lambda stage, msg: progress.send_log(msg, 'progress')
             )
         
             # Check shutdown after download
@@ -515,15 +565,27 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
                 break
                 
             if result['success']:
+                # Update progress based on result metadata
+                if 'metadata' in result:
+                    metadata = result['metadata']
+                    if 'likes' in metadata and 'comment_count' in metadata:
+                        progress.complete_metadata(metadata.get('likes', 0), metadata.get('comment_count', 0))
+                    
+                    # Transcription was done if whisper_transcription exists
+                    if 'whisper_transcription' in metadata:
+                        progress.complete_transcription(metadata.get('video_duration', 0))
+                
                 # Extract comments if MS_TOKEN available
                 comments = []
                 if ms_token and not shutdown_event.is_set():
+                    progress.start_comments()
                     comment_extractor = None
                     try:
                         comment_extractor = CommentExtractor(ms_token=ms_token, max_comments=args.max_comments)
                         comments = [c.to_dict() for c in comment_extractor.extract_comments_sync(url)]
+                        progress.complete_comments(len(comments))
                     except Exception as e:
-                        print(f"Error extracting comments: {e}")
+                        progress.report_error('comments', str(e))
                     finally:
                         # Ensure cleanup happens
                         if comment_extractor:
@@ -531,8 +593,11 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
                             # Give Playwright a moment to fully clean up
                             import time
                             time.sleep(0.1)
+                else:
+                    progress.skip_comments()
                 
                 # Prepare data
+                progress.start_saving()
                 video_data = {
                     'url': url,
                     'video_id': result['metadata'].get('video_id', ''),
@@ -543,12 +608,18 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
                 
                 if not shutdown_event.is_set():
                     result_queue.put({'success': True, 'data': video_data})
+                    progress.complete_saving()
+                    progress.complete_url()
             else:
+                # Report error
+                error_msg = result.get('error', 'Unknown error')
+                progress.report_error('processing', error_msg)
+                
                 # Pass along deleted flag if present
                 if not shutdown_event.is_set():
                     result_queue.put({
                         'success': False, 
-                        'error': result.get('error'),
+                        'error': error_msg,
                         'deleted': result.get('deleted', False),
                         'url': url
                     })
@@ -570,7 +641,8 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
         except:
             pass
         
-        print(f"Worker {worker_id} finished")
+        progress.send_status('completed')
+        progress.send_log('Worker finished', 'success')
 
 def load_urls_from_file(file_path: str) -> List[str]:
     """Load URLs from file."""
@@ -691,6 +763,10 @@ def merge_config_with_args(args, config: Dict[str, Any], cli_provided: set):
         # Output settings
         ('output', 'json_output'): 'json_output',
         
+        # Display settings
+        ('display', 'mode'): 'display_mode',
+        ('display', 'raw_log'): 'raw_log',
+        
         # Resume settings
         ('resume', 'force_redownload'): 'force_redownload',
         ('resume', 'clean_start'): 'clean_progress',
@@ -763,6 +839,13 @@ async def main():
     # System options
     parser.add_argument("--proxy", type=str, help="Proxy URL")
     parser.add_argument("--workers", type=int, default=1, help="Number of worker processes")
+    
+    # Display options
+    parser.add_argument("--display-mode", type=str, default="auto",
+                       choices=["rich", "simple", "auto"],
+                       help="Display mode for progress tracking")
+    parser.add_argument("--raw-log", action="store_true", 
+                       help="Save raw output to timestamped log file")
     
     args = parser.parse_args()
     

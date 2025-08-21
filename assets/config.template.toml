@@ -42,6 +42,21 @@ workers = 1
 # Main JSON output file
 json_output = "data/master2.json"
 
+[display]
+# Display mode for progress tracking
+# Options: "rich" (enhanced terminal UI), "simple" (basic output), "auto" (detect TTY)
+mode = "auto"
+# Save raw output to timestamped log file
+raw_log = false
+# Directory for raw log files
+raw_log_dir = "logs"
+# Display refresh rate in Hz (for rich mode)
+refresh_rate = 10
+# Maximum console output lines per worker (for rich mode)
+max_console_lines = 5
+# Enable colored output
+color_output = true
+
 [resume]
 # Skip already processed URLs (duplicate detection)
 skip_duplicates = true
