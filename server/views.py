@@ -3,6 +3,7 @@ from django.http import JsonResponse
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
+from django.conf import settings
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -267,9 +268,80 @@ class CollectorCompleteView(View):
             # Update collector status in services
             CollectorService._collector_process = None
             
+            # Create CollectorRun record for dashboard
+            try:
+                from django.utils import timezone
+                CollectorRun.objects.create(
+                    started_at=datetime.fromisoformat(started_at) if started_at else timezone.now(),
+                    ended_at=datetime.fromisoformat(stopped_at) if stopped_at else timezone.now(),
+                    urls_processed=urls_processed,
+                    status='completed' if reason == 'completed' else 'stopped'
+                )
+                logger.info("✅ CollectorRun record created for dashboard")
+            except Exception as e:
+                logger.warning(f"Could not create CollectorRun record: {e}")
+            
+            # Trigger ML training if new data was processed
+            if urls_processed > 0:
+                try:
+                    # Run ML training asynchronously
+                    import subprocess
+                    import threading
+                    
+                    def train_ml_async():
+                        try:
+                            logger.info("🧠 Starting ML model training after collector completion...")
+                            
+                            # First, run ETL to update gold layer features
+                            from django.db import connection
+                            with connection.cursor() as cursor:
+                                cursor.execute("SELECT etl_silver_to_gold();")
+                                cursor.execute("SELECT refresh_ml_training_view();")
+                            
+                            # Then run ML training
+                            result = subprocess.run(
+                                ['python', 'ml/train_ml.py', 'train'],
+                                capture_output=True,
+                                text=True,
+                                cwd=settings.BASE_DIR
+                            )
+                            
+                            if result.returncode == 0:
+                                logger.info("✅ ML model training completed successfully")
+                                
+                                # Update MLTrainingRun model
+                                MLTrainingRun.objects.create(
+                                    model_name='TikTokPerformancePredictor',
+                                    model_version='1.0',
+                                    training_data_count=urls_processed,
+                                    status='completed'
+                                )
+                            else:
+                                logger.error(f"❌ ML training failed: {result.stderr}")
+                                MLTrainingRun.objects.create(
+                                    model_name='TikTokPerformancePredictor',
+                                    model_version='1.0',
+                                    training_data_count=urls_processed,
+                                    status='failed',
+                                    notes=result.stderr[:500]  # Store first 500 chars of error
+                                )
+                        except Exception as e:
+                            logger.error(f"❌ Error during ML training: {e}")
+                    
+                    # Start training in background thread
+                    training_thread = threading.Thread(target=train_ml_async)
+                    training_thread.daemon = True
+                    training_thread.start()
+                    
+                    logger.info(f"🚀 ML training triggered for {urls_processed} new videos")
+                    
+                except Exception as e:
+                    logger.warning(f"Could not trigger ML training: {e}")
+            
             return JsonResponse({
                 'status': 'acknowledged',
-                'pending_urls': pending_count
+                'pending_urls': pending_count,
+                'ml_training_triggered': urls_processed > 0
             })
         except Exception as e:
             logger.error(f"Error processing collector completion: {e}")
@@ -288,13 +360,43 @@ def dashboard_view(request):
     except:
         pass
     
-    # Get last collector run
-    last_collector_run = CollectorRun.objects.filter(status__in=['completed', 'failed', 'stopped']).first()
-    last_collector_date = last_collector_run.ended_at if last_collector_run else None
+    # Get last collector run from database or Django model
+    last_collector_date = None
+    try:
+        # Try Django model first
+        last_collector_run = CollectorRun.objects.filter(status__in=['completed', 'failed', 'stopped']).order_by('-ended_at').first()
+        if last_collector_run:
+            last_collector_date = last_collector_run.ended_at
+        else:
+            # Fallback to direct database query
+            from django.db import connection
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT stopped_at FROM collector_status 
+                    WHERE id = 1 AND stopped_at IS NOT NULL
+                """)
+                result = cursor.fetchone()
+                if result:
+                    last_collector_date = result[0]
+    except Exception as e:
+        logger.debug(f"Could not get last collector run: {e}")
     
     # Get last ML training run
-    last_ml_run = MLTrainingRun.objects.first()
-    last_ml_date = last_ml_run.trained_at if last_ml_run else None
+    last_ml_date = None
+    try:
+        # Try Django model first
+        last_ml_run = MLTrainingRun.objects.order_by('-trained_at').first()
+        if last_ml_run:
+            last_ml_date = last_ml_run.trained_at
+        else:
+            # Check if model file exists as fallback
+            import os
+            model_path = os.path.join(settings.BASE_DIR, 'ml', 'models', 'snoo.pkl')
+            if os.path.exists(model_path):
+                from datetime import datetime
+                last_ml_date = datetime.fromtimestamp(os.path.getmtime(model_path))
+    except Exception as e:
+        logger.debug(f"Could not get last ML run: {e}")
     
     # Get video count
     video_count = Video.objects.count()

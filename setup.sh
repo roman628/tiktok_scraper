@@ -318,15 +318,72 @@ EOF
                 fi
             fi
             
-            # Run database migrations
-            if [ -f "database/migrate_json_to_postgres.py" ]; then
-                migrate_choice=$(read_bool "Run database migrations to create tables?" "true")
+            # Run database migrations and schema setup
+            if [ -f "database/schema.sql" ]; then
+                migrate_choice=$(read_bool "Run database migrations to create/update tables?" "true")
                 if [ "$migrate_choice" = "true" ]; then
-                    print_msg $YELLOW "Creating database tables..."
-                    python database/setup_database.py 2>/dev/null || {
-                        print_msg $YELLOW "setup_database.py not found, trying migration script..."
-                        python -c "from src.database_manager import DatabaseManager; db = DatabaseManager(host='localhost', database='$db_name', user='$db_user', password='$db_password'); print('Tables created successfully')" || print_msg $YELLOW "Manual table creation may be needed"
-                    }
+                    print_msg $YELLOW "Creating/updating database schema..."
+                    
+                    # Apply the main schema (safe to run multiple times due to IF NOT EXISTS)
+                    PGPASSWORD=$db_password psql -U $db_user -d $db_name -f database/schema.sql 2>&1 | \
+                        grep -v "already exists" | grep -v "NOTICE:" || true
+                    
+                    print_msg $GREEN "✓ Database schema applied"
+                    
+                    # Check if medallion migration is needed
+                    print_msg $YELLOW "Checking medallion architecture..."
+                    
+                    # Check if data needs migration to medallion architecture
+                    NEED_MIGRATION=$(PGPASSWORD=$db_password psql -U $db_user -d $db_name -tAc \
+                        "SELECT COUNT(*) FROM public.videos WHERE NOT EXISTS 
+                         (SELECT 1 FROM silver.videos WHERE silver.videos.video_id = public.videos.video_id);" 2>/dev/null || echo "0")
+                    
+                    if [ "$NEED_MIGRATION" -gt 0 ]; then
+                        print_msg $YELLOW "Found $NEED_MIGRATION videos to migrate to medallion architecture"
+                        
+                        # Run migration function
+                        PGPASSWORD=$db_password psql -U $db_user -d $db_name -c \
+                            "SELECT migrate_to_medallion();" 2>/dev/null || \
+                            print_msg $YELLOW "Migration function will be available after schema is applied"
+                        
+                        print_msg $GREEN "✓ Data migrated to medallion architecture"
+                    else
+                        print_msg $GREEN "✓ Medallion architecture is up to date"
+                    fi
+                    
+                    # Compute ML features
+                    print_msg $YELLOW "Computing ML features in gold layer..."
+                    FEATURES_COMPUTED=$(PGPASSWORD=$db_password psql -U $db_user -d $db_name -tAc \
+                        "SELECT etl_silver_to_gold();" 2>/dev/null || echo "0")
+                    
+                    if [ "$FEATURES_COMPUTED" -gt 0 ]; then
+                        print_msg $GREEN "✓ Computed features for $FEATURES_COMPUTED videos"
+                    else
+                        print_msg $GREEN "✓ ML features up to date"
+                    fi
+                    
+                    # Display database statistics
+                    print_msg $BLUE "\n--- Database Statistics ---"
+                    PGPASSWORD=$db_password psql -U $db_user -d $db_name <<EOF 2>/dev/null || true
+SELECT 
+    'Public Videos' as layer, COUNT(*) as count FROM public.videos
+UNION ALL
+SELECT 'Silver Videos', COUNT(*) FROM silver.videos
+UNION ALL
+SELECT 'Gold Features', COUNT(*) FROM gold.ml_features
+UNION ALL
+SELECT 'Transcriptions', COUNT(*) FROM public.transcriptions;
+EOF
+                    
+                    # Legacy migration if master2.json exists
+                    if [ -f "data/master2.json" ]; then
+                        json_migrate=$(read_bool "Import data from master2.json?" "false")
+                        if [ "$json_migrate" = "true" ]; then
+                            print_msg $YELLOW "Importing from master2.json..."
+                            python database/migrate_json_to_postgres.py data/master2.json || \
+                                print_msg $YELLOW "JSON migration may need manual attention"
+                        fi
+                    fi
                 fi
             fi
             

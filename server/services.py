@@ -97,63 +97,81 @@ class CollectorService:
     def is_collector_running() -> bool:
         """
         Check if collector.py is currently running.
-        First checks process, then database status.
+        First checks tracked process, then verifies via psutil, then checks database.
         
         Returns:
             True if collector is running, False otherwise
         """
-        # Check process first
-        if CollectorService._collector_process is None:
-            # No process tracked, check database
-            try:
-                from django.db import connection
-                with connection.cursor() as cursor:
-                    cursor.execute("""
-                        SELECT status, pid, last_activity 
-                        FROM collector_status 
-                        WHERE id = 1
-                    """)
-                    result = cursor.fetchone()
-                    if result and result[0] == 'running':
-                        # Check if the PID is still alive
-                        pid = result[1]
-                        if pid and psutil.pid_exists(pid):
-                            try:
-                                process = psutil.Process(pid)
-                                cmdline = ' '.join(process.cmdline())
-                                if 'collector.py' in cmdline:
-                                    logger.info(f"Found running collector from database (PID: {pid})")
-                                    return True
-                            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                                pass
-                        # PID not alive, update database
+        # First check if we have a tracked process
+        if CollectorService._collector_process is not None:
+            # Check if the tracked process is still alive
+            poll_result = CollectorService._collector_process.poll()
+            if poll_result is not None:
+                # Process has terminated
+                logger.debug(f"Tracked collector process (PID: {CollectorService._collector_process.pid}) has terminated")
+                CollectorService._collector_process = None
+                # Update database
+                try:
+                    from django.db import connection
+                    with connection.cursor() as cursor:
                         cursor.execute("""
                             UPDATE collector_status 
                             SET status = 'stopped', stopped_at = NOW()
                             WHERE id = 1
                         """)
-            except Exception as e:
-                logger.warning(f"Could not check database collector status: {e}")
-            return False
+                except Exception as e:
+                    logger.warning(f"Could not update collector status in database: {e}")
+            else:
+                # Process still running according to poll(), verify with psutil
+                try:
+                    if psutil.pid_exists(CollectorService._collector_process.pid):
+                        process = psutil.Process(CollectorService._collector_process.pid)
+                        cmdline = ' '.join(process.cmdline())
+                        if 'collector.py' in cmdline:
+                            return True
+                        else:
+                            logger.warning(f"Process {CollectorService._collector_process.pid} exists but is not collector.py")
+                            CollectorService._collector_process = None
+                except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                    logger.debug(f"Process check failed: {e}")
+                    CollectorService._collector_process = None
         
-        # Check if the tracked process is still alive
-        if CollectorService._collector_process.poll() is not None:
-            # Process has terminated
-            CollectorService._collector_process = None
-            return False
-        
-        # Additionally check if the process exists in the system
+        # No tracked process or it's dead, check database for other instances
         try:
-            if psutil.pid_exists(CollectorService._collector_process.pid):
-                process = psutil.Process(CollectorService._collector_process.pid)
-                # Check if it's actually our collector.py
-                cmdline = ' '.join(process.cmdline())
-                if 'collector.py' in cmdline:
-                    return True
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
+            from django.db import connection
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT status, pid, last_activity 
+                    FROM collector_status 
+                    WHERE id = 1
+                """)
+                result = cursor.fetchone()
+                if result and result[0] == 'running':
+                    pid = result[1]
+                    if pid:
+                        # Verify the PID is actually running collector.py
+                        try:
+                            if psutil.pid_exists(pid):
+                                process = psutil.Process(pid)
+                                cmdline = ' '.join(process.cmdline())
+                                if 'collector.py' in cmdline:
+                                    logger.debug(f"Found running collector from database (PID: {pid})")
+                                    return True
+                                else:
+                                    logger.debug(f"PID {pid} exists but is not running collector.py")
+                        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as e:
+                            logger.debug(f"Process {pid} check failed: {e}")
+                    
+                    # PID not alive or not collector.py, update database
+                    logger.debug("Updating database: collector no longer running")
+                    cursor.execute("""
+                        UPDATE collector_status 
+                        SET status = 'stopped', stopped_at = NOW()
+                        WHERE id = 1
+                    """)
+        except Exception as e:
+            logger.warning(f"Could not check database collector status: {e}")
         
-        CollectorService._collector_process = None
         return False
     
     @staticmethod
@@ -169,7 +187,7 @@ class CollectorService:
         Returns:
             Subprocess instance or existing process
         """
-        # Check if collector is already running
+        # Perform a fresh check if collector is actually running
         if CollectorService.is_collector_running():
             # Check pending URLs to give accurate feedback
             pending_count = QueuedURL.objects.filter(status='pending').count()

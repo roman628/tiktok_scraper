@@ -13,6 +13,7 @@ import time
 import signal
 import queue
 import multiprocessing as mp
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
@@ -145,6 +146,89 @@ class RobustTikTokProcessor:
                 filtered.append(url)
         return filtered
     
+    def _start_watchdog_thread(self, workers, shutdown_event):
+        """Start a watchdog thread to monitor for deadlocks and worker health."""
+        def watchdog():
+            last_check = time.time()
+            stall_count = 0
+            
+            while not shutdown_event.is_set():
+                time.sleep(10)  # Check every 10 seconds
+                
+                # Check if any workers are alive
+                alive_count = sum(1 for w in workers if w.is_alive())
+                
+                if alive_count == 0 and not shutdown_event.is_set():
+                    print("\n🔴 Watchdog: All workers dead unexpectedly, setting shutdown event")
+                    shutdown_event.set()
+                    break
+                
+                # Check for extended stalls (workers alive but not producing)
+                current_time = time.time()
+                if current_time - last_check > 120:  # 2 minutes without activity
+                    stall_count += 1
+                    if stall_count >= 3:  # 6 minutes total
+                        print(f"\n🔴 Watchdog: Extended stall detected ({stall_count * 2} minutes), forcing shutdown")
+                        shutdown_event.set()
+                        break
+                    else:
+                        print(f"\n⚠️ Watchdog: Possible stall detected (check {stall_count}/3)")
+                
+                # Log periodic health status
+                if int(current_time) % 60 == 0:  # Every minute
+                    print(f"  🟢 Watchdog: {alive_count}/{len(workers)} workers alive")
+        
+        watchdog_thread = threading.Thread(target=watchdog, daemon=True, name="CollectorWatchdog")
+        watchdog_thread.start()
+        return watchdog_thread
+    
+    def _drain_queues_forcibly(self, result_queue, display_queue, display_manager):
+        """Forcibly drain queues when deadlock is detected or during cleanup."""
+        drained_results = 0
+        drained_display = 0
+        
+        # Drain result queue
+        try:
+            while True:
+                try:
+                    result = result_queue.get_nowait()
+                    drained_results += 1
+                    if drained_results > 1000:  # Prevent infinite loop
+                        print(f"  ⚠️ Stopped draining result queue after {drained_results} items")
+                        break
+                except queue.Empty:
+                    break
+                except Exception as e:
+                    print(f"  Error draining result queue: {e}")
+                    break
+        except Exception as e:
+            print(f"  Failed to drain result queue: {e}")
+        
+        # Drain display queue
+        try:
+            while True:
+                try:
+                    msg = display_queue.get_nowait()
+                    if display_manager:
+                        try:
+                            display_manager.process_update(msg)
+                        except:
+                            pass  # Display might be stopped already
+                    drained_display += 1
+                    if drained_display > 1000:  # Prevent infinite loop
+                        print(f"  ⚠️ Stopped draining display queue after {drained_display} items")
+                        break
+                except queue.Empty:
+                    break
+                except Exception as e:
+                    print(f"  Error draining display queue: {e}")
+                    break
+        except Exception as e:
+            print(f"  Failed to drain display queue: {e}")
+        
+        if drained_results > 0 or drained_display > 0:
+            print(f"  Drained {drained_results} results, {drained_display} display messages")
+    
     async def process_urls(self, urls: List[str], download_kwargs: Dict[str, Any]):
         """Process all URLs using worker processes (even if just 1 worker)."""
         self.state.total_urls = len(urls)
@@ -202,19 +286,59 @@ class RobustTikTokProcessor:
             p.start()
             workers.append(p)
         
+        # Start watchdog thread for additional monitoring
+        watchdog = self._start_watchdog_thread(workers, shutdown_event)
+        
         # Process results
         processed = 0
         failed = 0
         workers_done = 0
         
+        # Deadlock detection variables
+        loop_start_time = time.time()
+        max_processing_time = len(urls) * 300  # 5 minutes per URL max
+        last_progress_time = time.time()
+        last_workers_done = 0
+        stall_check_interval = 60  # Check for stalls every 60 seconds
+        
         try:
             while workers_done < self.args.workers:
+                loop_iteration_start = time.time()
+                
+                # DEADLOCK DETECTION: Check for overall timeout
+                if loop_iteration_start - loop_start_time > max_processing_time:
+                    print(f"\n⚠️ WARNING: Processing timeout after {max_processing_time}s, forcing shutdown")
+                    shutdown_event.set()
+                    break
+                
+                # DEADLOCK DETECTION: Check for progress stall
+                if workers_done == last_workers_done:
+                    if loop_iteration_start - last_progress_time > stall_check_interval:
+                        print(f"\n⚠️ WARNING: No progress for {stall_check_interval}s, checking worker health...")
+                        alive_workers = sum(1 for w in workers if w.is_alive())
+                        print(f"  Alive workers: {alive_workers}/{len(workers)}, Workers done: {workers_done}")
+                        
+                        if alive_workers == 0:
+                            print("  ❌ All workers dead, forcing shutdown")
+                            break
+                        elif alive_workers < len(workers) - workers_done:
+                            print(f"  ⚠️ Some workers died unexpectedly, may need intervention")
+                            # Give it one more minute before giving up
+                            stall_check_interval = 30
+                else:
+                    last_progress_time = loop_iteration_start
+                    last_workers_done = workers_done
+                    stall_check_interval = 60  # Reset to normal interval
+                
                 # Update display
                 while not display_queue.empty():
                     try:
                         msg = display_queue.get_nowait()
                         display_manager.process_update(msg)
                     except queue.Empty:
+                        break
+                    except Exception as e:
+                        print(f"Display queue error: {e}")
                         break
                 
                 display_manager.update()
@@ -224,6 +348,7 @@ class RobustTikTokProcessor:
                     result = result_queue.get(timeout=0.1)
                     if result is None:
                         workers_done += 1
+                        last_progress_time = time.time()  # Reset progress timer
                     elif result['success']:
                         processed += 1
                         self.state.processed_urls = processed
@@ -233,6 +358,9 @@ class RobustTikTokProcessor:
                         if result.get('deleted') and self.source_file:
                             URLProcessor.remove_url_from_file(result['url'], self.source_file)
                 except queue.Empty:
+                    continue
+                except Exception as e:
+                    print(f"Result queue error: {e}")
                     continue
                 
                 # Check for shutdown
@@ -245,12 +373,30 @@ class RobustTikTokProcessor:
             shutdown_event.set()
         
         finally:
-            # Wait for workers to finish
+            # Signal shutdown to all workers
             shutdown_event.set()
-            for p in workers:
-                p.join(timeout=5)
+            
+            # Improved worker termination with better timeouts
+            print("\nWaiting for workers to finish...")
+            for i, p in enumerate(workers):
+                p.join(timeout=10)  # Increased timeout from 5 to 10 seconds
                 if p.is_alive():
+                    print(f"Worker {i} didn't respond to shutdown, terminating forcibly")
                     p.terminate()
+                    # Give it a moment to clean up
+                    p.join(timeout=2)
+                    if p.is_alive():
+                        # Last resort - force kill
+                        try:
+                            print(f"Worker {i} still alive, force killing")
+                            p.kill()
+                            p.join(timeout=1)
+                        except Exception as e:
+                            print(f"Failed to kill worker {i}: {e}")
+            
+            # Drain any remaining messages from queues to prevent deadlock
+            print("Draining queues...")
+            self._drain_queues_forcibly(result_queue, display_queue, display_manager)
             
             # Stop display
             display_manager.stop()
@@ -586,10 +732,28 @@ async def worker_process(worker_id: int, url_queue, result_queue, display_queue,
         except Exception as e:
             print(f"Worker {worker_id} cleanup error: {e}")
         
-        try:
-            result_queue.put(None, timeout=0.1)
-        except:
-            pass
+        # Ensure we signal completion - try multiple times with better timeout
+        completion_sent = False
+        for attempt in range(3):
+            try:
+                result_queue.put(None, timeout=1.0)  # Increased timeout from 0.1 to 1.0
+                completion_sent = True
+                print(f"Worker {worker_id} sent completion signal")
+                break
+            except Exception as e:
+                if attempt == 2:
+                    print(f"Worker {worker_id} failed to send completion signal after 3 attempts: {e}")
+                time.sleep(0.2)  # Brief pause before retry
+        
+        # If we couldn't signal through queue, log it
+        if not completion_sent:
+            print(f"⚠️ Worker {worker_id} could not signal completion via queue")
+            # Write to a file as last resort for debugging
+            try:
+                with open(f'/tmp/worker_{worker_id}_failed_signal', 'w') as f:
+                    f.write(f'Worker {worker_id} completed but could not signal via queue\n')
+            except:
+                pass
         
         progress.send_status('completed')
         progress.send_log('Worker finished', 'success')

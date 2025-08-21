@@ -2,11 +2,9 @@
 TikTok Performance Predictor Package
 
 This package contains tools for predicting TikTok video performance:
-- TikTokPredictor: Main prediction class
-- TikTokPredictionAPI: API interface for predictions
-- predict_performance: CLI tool for text-based predictions
+- TikTokPerformancePredictor: Main prediction class for ML model
 """
 
-from .tiktok_predictor import TikTokPredictor, TikTokPredictionAPI, TikTokFeatureExtractor
+from .train_ml import TikTokPerformancePredictor
 
-__all__ = ['TikTokPredictor', 'TikTokPredictionAPI', 'TikTokFeatureExtractor']
+__all__ = ['TikTokPerformancePredictor']

@@ -4,7 +4,7 @@ TikTok Performance Prediction Model - Supervised Learning Implementation
 
 This module implements a supervised learning model that predicts TikTok video performance
 scores (0-100) directly from transcript text. The model is trained on real performance
-data from master2.json and learns to predict how well content will perform based on
+data from the PostgreSQL database and learns to predict how well content will perform based on
 transcript patterns.
 
 Features:
@@ -18,7 +18,6 @@ Features:
 Date: 2025-07-31
 """
 
-import json
 import pickle
 import numpy as np
 import pandas as pd
@@ -29,6 +28,10 @@ import logging
 from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import tomllib
+import os
 
 # ML Imports
 try:
@@ -110,47 +113,173 @@ class TikTokPerformancePredictor:
             'engagement_emotions': [],
             'curiosity_words': []
         }
+    
+    def _load_from_database(self) -> List[Dict]:
+        """Load training data from PostgreSQL database using config.toml settings."""
+        # Load database config
+        config_path = Path(__file__).parent.parent / 'config.toml'
+        if not config_path.exists():
+            raise FileNotFoundError(f"config.toml not found at {config_path}")
+        
+        with open(config_path, 'rb') as f:
+            config = tomllib.load(f)
+        
+        db_config = config.get('database', {})
+        if not db_config.get('enabled', True):
+            raise ValueError("Database is disabled in config.toml")
+        
+        # Connect to database
+        conn_params = {
+            'host': db_config.get('host', 'localhost'),
+            'database': db_config.get('database', 'tiktok_scraper'),
+            'user': db_config.get('user', os.getenv('USER')),
+            'password': db_config.get('password', ''),
+            'port': db_config.get('port', 5432)
+        }
+        
+        # Remove empty password if not set
+        if not conn_params['password']:
+            del conn_params['password']
+        
+        conn = psycopg2.connect(**conn_params, cursor_factory=RealDictCursor)
+        cursor = conn.cursor()
+        
+        # Query to get data from gold layer (or silver if gold not ready)
+        query = """
+            SELECT 
+                v.video_id,
+                v.url,
+                v.title,
+                v.description,
+                v.uploader,
+                v.view_count,
+                v.like_count,
+                v.comment_count,
+                v.share_count,
+                v.upload_date,
+                v.duration,
+                t.whisper_transcription,
+                -- Get comments as JSONB array
+                COALESCE(
+                    (SELECT jsonb_agg(
+                        jsonb_build_object(
+                            'comment_id', c.comment_id,
+                            'username', c.username,
+                            'comment_text', c.comment_text,
+                            'like_count', c.like_count
+                        ) ORDER BY c.like_count DESC
+                    ) 
+                    FROM comments c 
+                    WHERE c.video_id = v.id
+                    LIMIT 100
+                    ), '[]'::jsonb
+                ) as comments,
+                -- Get features from gold layer if available
+                f.engagement_rate,
+                f.virality_score,
+                f.performance_tier
+            FROM videos v
+            LEFT JOIN transcriptions t ON t.video_id = v.id
+            LEFT JOIN gold.ml_features f ON f.video_id = v.video_id
+            WHERE v.view_count IS NOT NULL
+            AND t.whisper_transcription IS NOT NULL
+            AND LENGTH(t.whisper_transcription) > 10
+            ORDER BY v.downloaded_at DESC
+        """
+        
+        try:
+            cursor.execute(query)
+            results = cursor.fetchall()
+            
+            # Convert to list of dicts matching expected format
+            videos = []
+            for row in results:
+                video = dict(row)
+                # Ensure comments is a list
+                if isinstance(video.get('comments'), str):
+                    # Comments already parsed from jsonb in PostgreSQL
+                    pass  # Already in correct format
+                elif video.get('comments') is None:
+                    video['comments'] = []
+                videos.append(video)
+            
+            return videos
+            
+        finally:
+            cursor.close()
+            conn.close()
         
     def calculate_performance_score(self, view_count: int, like_count: int, comment_count: int, 
                                    comments: List[Any] = None) -> float:
-        """Convert real metrics to 0-100 performance score, enhanced with comment quality analysis."""
-        # Calculate engagement rate
+        """Calculate virality score with better differentiation between content tiers."""
+        # Enhanced engagement metrics
         engagement_rate = like_count / max(view_count, 1)
+        comment_rate = comment_count / max(view_count, 1)
         
-        # View score based on percentiles
+        # Virality multiplier based on engagement quality
+        virality_multiplier = 1.0
+        if engagement_rate > 0.15:  # Exceptional engagement (>15%)
+            virality_multiplier = 2.0
+        elif engagement_rate > 0.10:  # Great engagement (>10%)
+            virality_multiplier = 1.5
+        elif engagement_rate > 0.05:  # Good engagement (>5%)
+            virality_multiplier = 1.2
+        
+        # Enhanced view score with wider range
         if view_count >= 10_000_000:
-            view_score = 90 + min(10, (view_count - 10_000_000) / 1_000_000)
+            view_score = 85 + min(15, (view_count - 10_000_000) / 2_000_000)
         elif view_count >= 5_000_000:
-            view_score = 75 + (view_count - 5_000_000) / 333_333
+            view_score = 70 + (view_count - 5_000_000) / 333_333 * virality_multiplier
         elif view_count >= 1_000_000:
-            view_score = 60 + (view_count - 1_000_000) / 266_667
+            view_score = 50 + (view_count - 1_000_000) / 80_000 * virality_multiplier
         elif view_count >= 500_000:
-            view_score = 45 + (view_count - 500_000) / 33_333
+            view_score = 35 + (view_count - 500_000) / 33_333 * virality_multiplier
         elif view_count >= 100_000:
-            view_score = 25 + (view_count - 100_000) / 20_000
+            view_score = 20 + (view_count - 100_000) / 26_666
+        elif view_count >= 10_000:
+            view_score = 10 + (view_count - 10_000) / 9_000
         else:
-            view_score = max(0, view_count / 4000)
+            # Low performing content gets much lower scores
+            view_score = max(0, view_count / 1000)
         
-        # Engagement bonus/penalty
-        engagement_multiplier = 1.0
-        if engagement_rate > 0.2:  # Very high engagement
-            engagement_multiplier = 1.2
-        elif engagement_rate > 0.15:  # High engagement
-            engagement_multiplier = 1.1
-        elif engagement_rate < 0.05:  # Low engagement
-            engagement_multiplier = 0.8
+        # Enhanced engagement scoring with wider variance
+        if engagement_rate > 0.2:  # Exceptional (>20% engagement)
+            engagement_bonus = 25
+        elif engagement_rate > 0.15:  # Viral-level (>15%)
+            engagement_bonus = 20
+        elif engagement_rate > 0.10:  # Great (>10%)
+            engagement_bonus = 15
+        elif engagement_rate > 0.05:  # Good (>5%)
+            engagement_bonus = 8
+        elif engagement_rate > 0.02:  # Average (2-5%)
+            engagement_bonus = 3
+        else:  # Poor (<2%)
+            engagement_bonus = -5  # Penalty for low engagement
         
-        # Comment bonus - enhanced with quality analysis
-        comment_bonus = min(5, comment_count / 1000)  # Base bonus
+        # Comment engagement scoring
+        comment_bonus = 0
+        if comment_rate > 0.01:  # >1% comment rate is excellent
+            comment_bonus = 10
+        elif comment_rate > 0.005:  # 0.5-1% is good
+            comment_bonus = 5
+        elif comment_rate > 0.001:  # 0.1-0.5% is average
+            comment_bonus = 2
         
         # Analyze comment quality for additional scoring (if comments provided)
         if comments:
             quality_bonus = self._analyze_comment_quality(comments)
             comment_bonus += quality_bonus
         
-        # Final score
-        final_score = (view_score * engagement_multiplier) + comment_bonus
-        return max(0, min(100, final_score))
+        # Calculate final score with wider distribution
+        base_score = view_score + engagement_bonus + comment_bonus
+        
+        # Apply logarithmic scaling for extreme outliers
+        if view_count > 50_000_000:  # Mega-viral content
+            base_score = min(100, base_score * 1.2)
+        elif view_count < 1000 and engagement_rate < 0.02:  # Very poor performance
+            base_score = max(0, base_score * 0.5)
+        
+        return max(0, min(100, base_score))
     
     def _analyze_comment_quality(self, comments: List[Any]) -> float:
         """Analyze comment quality patterns discovered during training."""
@@ -200,16 +329,14 @@ class TikTokPerformancePredictor:
         
         return min(3.0, bonus)  # Cap at 3 point bonus
     
-    def train(self, data_path: str, test_size: float = 0.2) -> Dict[str, Any]:
-        """Train the model on master2.json data."""
+    def train(self, data_source: Optional[str] = None, test_size: float = 0.2, use_database: bool = True) -> Dict[str, Any]:
+        """Train the model on database data."""
         logger.info("Starting supervised learning training...")
         start_time = time.time()
         
-        # Load data
-        with open(data_path, 'r', encoding='utf-8') as f:
-            videos = json.load(f)
-        
-        logger.info(f"Loaded {len(videos)} videos from {data_path}")
+        # Load data from database
+        videos = self._load_from_database()
+        logger.info(f"Loaded {len(videos)} videos from database")
         
         # First pass: collect transcripts, comments and calculate scores
         logger.info("Collecting transcripts, comments and calculating performance scores...")
@@ -500,7 +627,7 @@ class TikTokPerformancePredictor:
         return features
     
     def _extract_hook_features(self, transcript: str, words: List[str]) -> Dict[str, float]:
-        """Extract hook analysis features with 5-second gradient weighting and learned viral patterns."""
+        """Extract hook analysis features with enhanced viral pattern detection."""
         features = {}
         
         # Extract first 5 seconds (approximately first 15-20 words based on speaking rate ~3 words/sec)
@@ -514,6 +641,40 @@ class TikTokPerformancePredictor:
         # Basic hook metrics
         features['hook_word_count'] = len(first_5_sec_words)
         features['hook_sentence_length'] = len(first_sentence.split())
+        
+        # ENHANCED VIRAL PATTERNS
+        # Psychological trigger words (expanded set)
+        psychological_triggers = [
+            'secret', 'hidden', 'nobody', 'everyone', 'always', 'never', 'truth',
+            'shocking', 'insane', 'crazy', 'unbelievable', 'mind-blowing', 'literally',
+            'actually', 'honestly', 'warning', 'urgent', 'breaking', 'exclusive'
+        ]
+        
+        # FOMO (Fear of Missing Out) indicators
+        fomo_patterns = [
+            'before its', 'limited time', 'dont miss', 'hurry', 'last chance',
+            'trending', 'viral', 'everyone is', 'you need to', 'must see'
+        ]
+        
+        # Curiosity gap creators
+        curiosity_patterns = [
+            'wait till', 'you wont believe', 'this is why', 'the reason',
+            'what happens when', 'i discovered', 'nobody talks about',
+            'the truth about', 'what they dont tell'
+        ]
+        
+        # Count psychological triggers in opening
+        trigger_count = sum(1 for word in first_5_sec_text.split() if word in psychological_triggers)
+        features['opening_trigger_count'] = trigger_count
+        features['opening_trigger_density'] = trigger_count / max(len(first_5_sec_words), 1)
+        
+        # Check for FOMO patterns
+        fomo_score = sum(1 for pattern in fomo_patterns if pattern in first_5_sec_text)
+        features['fomo_hook_score'] = fomo_score
+        
+        # Check for curiosity patterns
+        curiosity_score = sum(1 for pattern in curiosity_patterns if pattern in first_5_sec_text)
+        features['curiosity_hook_score'] = curiosity_score
         
         # Viral phrase matching (learned from data)
         viral_phrase_matches = 0
@@ -1025,7 +1186,7 @@ class TikTokPerformancePredictor:
             return {}
     
     def _discover_content_patterns(self, transcripts: List[str], scores: List[float]) -> Dict[str, Any]:
-        """Discover patterns throughout content."""
+        """Discover viral content patterns from high-performing videos."""
         import numpy as np
         try:
             from scipy.stats import pearsonr
@@ -1035,6 +1196,19 @@ class TikTokPerformancePredictor:
         from collections import defaultdict
         
         discovered_patterns = {}
+        
+        # Focus on top 20% performing content for viral pattern learning
+        threshold = np.percentile(scores, 80)
+        viral_transcripts = [t for t, s in zip(transcripts, scores) if s >= threshold]
+        
+        # Learn opening patterns from viral content
+        viral_openings = []
+        for transcript in viral_transcripts[:100]:  # Sample top 100
+            words = transcript.lower().split()[:20]  # First 20 words
+            if words:
+                viral_openings.append(' '.join(words))
+        
+        discovered_patterns['viral_openings'] = viral_openings[:10]  # Store top 10 examples
         segment_correlations = {}
         
         for segment_length in [5, 10, 20, 30]:
@@ -1350,8 +1524,7 @@ def main():
     
     parser = argparse.ArgumentParser(description="TikTok Performance Predictor")
     parser.add_argument('command', choices=['train', 'predict'], help='Command to run')
-    parser.add_argument('--data', default=str(project_root / 'data' / 'master2.json'), 
-                       help='Path to training data (master2.json)')
+    # Database connection is configured via config.toml
     parser.add_argument('--model', default=str(script_dir / 'models' / 'snoo.pkl'),
                        help='Path to model file')
     parser.add_argument('--text', help='Text to predict (for predict command)')
@@ -1360,7 +1533,7 @@ def main():
     
     if args.command == 'train':
         predictor = TikTokPerformancePredictor()
-        metrics = predictor.train(args.data)
+        metrics = predictor.train()  # Now loads from database
         predictor.save_model(args.model)
         
         print("\n=== Training Complete ===")
