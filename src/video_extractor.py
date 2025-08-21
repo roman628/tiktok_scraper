@@ -38,7 +38,8 @@ class VideoExtractor:
     
     def download_single_video(self, url: str, audio_only: bool = False, 
                             use_whisper: bool = False, whisper_model: Any = None,
-                            whisper_device: str = "CPU", shutdown_event=None) -> Dict[str, Any]:
+                            whisper_device: str = "CPU", 
+                            shutdown_event=None) -> Dict[str, Any]:
         """Download a single TikTok video with metadata.
         
         Args:
@@ -239,7 +240,7 @@ class VideoExtractor:
             return None
     
     def _transcribe_video(self, video_path: Path, whisper_model: Any, device: str) -> str:
-        """Transcribe video using Whisper."""
+        """Transcribe video using local Whisper model."""
         if whisper_model:
             # Use provided model directly (faster-whisper only)
             try:
@@ -288,12 +289,11 @@ class VideoExtractor:
         ResourceManager.cleanup_memory()
         ResourceManager.kill_browser_processes()
 
-def load_whisper_model(force_cpu: bool = False, cache_dir: str = None):
+def load_whisper_model(force_cpu: bool = False):
     """Load Whisper model for transcription.
     
     Args:
         force_cpu: Force CPU usage even if GPU available
-        cache_dir: Optional cache directory for model files
         
     Returns:
         Tuple of (model, device_string)
@@ -313,23 +313,24 @@ def load_whisper_model(force_cpu: bool = False, cache_dir: str = None):
     from faster_whisper import WhisperModel
     
     try:
-        model_kwargs = {
-            "model_size_or_path": "small.en",
-            "device": device,
-            "compute_type": compute_type
-        }
-        if cache_dir:
-            model_kwargs["download_root"] = cache_dir
-            
-        model = WhisperModel(**model_kwargs)
+        # Load model - will automatically use HF cache if already downloaded
+        model = WhisperModel(
+            model_size_or_path="small.en",
+            device=device,
+            compute_type=compute_type
+        )
         print(f"✓ Whisper model loaded on {device.upper()}")
         return model, device.upper()
     except Exception as e:
         print(f"Failed to load Whisper model on {device}: {e}")
         if device != "cpu":
             print("Falling back to CPU")
-            model = WhisperModel("small.en", device="cpu", compute_type="int8")
-            return model, "CPU"
+            try:
+                model = WhisperModel("small.en", device="cpu", compute_type="int8")
+                return model, "CPU"
+            except Exception as cpu_err:
+                print(f"Failed to load on CPU: {cpu_err}")
+                return None, "CPU"
         return None, "CPU"
 
 def get_memory_usage():

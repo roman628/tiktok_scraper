@@ -29,7 +29,7 @@ from src.models import VideoData, ProcessingState, Comment
 from src.url_processor import URLProcessor  
 from src.resource_manager import ResourceManager
 from src.data_manager import DataManager
-from src.video_extractor import VideoExtractor, load_whisper_model, get_memory_usage
+from src.video_extractor import VideoExtractor, load_whisper_model
 from src.comment_extractor import CommentExtractor
 from src.transcript_extractor import TranscriptExtractor
 
@@ -273,6 +273,7 @@ class MultiprocessCoordinator:
     """Coordinator for multiprocess data collection."""
     
     def __init__(self, args, ms_token: Optional[str] = None):
+            
         self.args = args
         self.ms_token = ms_token
         self.num_workers = args.workers
@@ -283,36 +284,27 @@ class MultiprocessCoordinator:
         self.shutdown_event = self.manager.Event()
         self.whisper_config = None
         
-        # Pre-load Whisper model to cache if needed
+        # Setup Whisper configuration
         if args.whisper:
-            print("Pre-loading Whisper model to cache for workers...")
-            model, device = load_whisper_model(force_cpu=args.force_cpu)
-            if model:
-                # Get the cache directory from the model if available
-                cache_dir = None
-                if hasattr(model, 'model_path'):
-                    cache_dir = os.path.dirname(model.model_path)
-                elif hasattr(model, 'download_root'):
-                    cache_dir = model.download_root
-                else:
-                    # Default cache directory for faster-whisper
-                    cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
-                
-                # Prepare configuration for workers
-                self.whisper_config = {
-                    'model_size': 'small.en',
-                    'device': device.lower() if device != 'MPS' else 'cpu',  # Force CPU for MPS
-                    'compute_type': 'int8' if device.lower() == 'cpu' else 'float16',
-                    'cache_dir': cache_dir
-                }
-                print(f"✓ Whisper model cached, workers will load from: {cache_dir}")
-                
-                # Clean up the pre-loaded model to free memory
-                del model
-                import gc
-                gc.collect()
-            else:
-                print("Failed to pre-load Whisper model")
+            print("Setting up Whisper model configuration...")
+            from src.device_manager import DeviceManager
+            device, compute_type = DeviceManager.get_whisper_device_config(args.force_cpu)
+            
+            # Handle MPS
+            if device == "mps":
+                device = "cpu"
+                compute_type = "int8"
+            
+            self.whisper_config = {
+                'model_size': 'small.en',
+                'device': device,
+                'compute_type': compute_type,
+                'force_cpu': args.force_cpu
+            }
+            
+            # Each worker will load its own Whisper model
+            print(f"✓ Each of {self.num_workers} workers will load Whisper model: {self.whisper_config['model_size']}")
+            print(f"✓ Device: {device.upper()}, Compute: {compute_type}")
     
     async def process_urls_multiprocess(self, urls: List[str], download_kwargs: Dict[str, Any], 
                                        master_file: str, source_file: Optional[str]):
@@ -405,7 +397,7 @@ class MultiprocessCoordinator:
               f"{self.shared_state['failed']} failed")
 
 def load_cached_whisper_model(model_config: Dict[str, Any]):
-    """Load Whisper model from cached configuration.
+    """Load Whisper model using configuration.
     
     Args:
         model_config: Configuration dictionary with model parameters
@@ -423,24 +415,19 @@ def load_cached_whisper_model(model_config: Dict[str, Any]):
         model_size = model_config.get('model_size', 'small.en')
         device = model_config.get('device', 'cpu')
         compute_type = model_config.get('compute_type', 'int8')
-        cache_dir = model_config.get('cache_dir')
         
-        print(f"Worker loading cached Whisper model: {model_size} on {device.upper()}")
+        print(f"Worker loading Whisper model: {model_size} on {device.upper()}")
         
-        # Load model with cache directory to avoid re-downloading
-        model_kwargs = {
-            "model_size_or_path": model_size,
-            "device": device,
-            "compute_type": compute_type
-        }
-        if cache_dir:
-            model_kwargs["download_root"] = cache_dir
-            
-        model = WhisperModel(**model_kwargs)
+        # Load model - will use HF cache automatically if already downloaded
+        model = WhisperModel(
+            model_size_or_path=model_size,
+            device=device,
+            compute_type=compute_type
+        )
         return model
         
     except Exception as e:
-        print(f"Failed to load cached Whisper model: {e}")
+        print(f"Failed to load Whisper model: {e}")
         return None
 
 def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
@@ -448,6 +435,7 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
                   whisper_config: Dict[str, Any] = None):
     """Worker process for parallel data collection."""
     print(f"Worker {worker_id} started")
+    silent = False  # Set silent flag for logging
     
     # Import shutdown handler for worker
     from src.shutdown_manager import WorkerShutdownHandler
@@ -472,16 +460,19 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
     # Pass shutdown event to video extractor
     video_extractor.shutdown_event = shutdown_event
     
-    # Load whisper model from cache config if provided
+    # Setup Whisper - each worker loads its own model
     whisper_model = None
+    
     if args.whisper:
         if whisper_config:
-            # Load from cached configuration (avoids re-download)
+            # Load local model for this worker
             whisper_model = load_cached_whisper_model(whisper_config)
-            if not whisper_model:
-                print(f"Worker {worker_id}: Failed to load Whisper model from cache")
+            if whisper_model:
+                print(f"[Worker {worker_id}] Loaded Whisper model on {whisper_config.get('device', 'cpu').upper()}")
+            else:
+                print(f"[Worker {worker_id}] Failed to load Whisper model")
         else:
-            # Fallback to regular loading (for backwards compatibility)
+            # Fallback
             whisper_model, _ = load_whisper_model(force_cpu=args.force_cpu)
     
     # Process URLs with shutdown checking
@@ -508,12 +499,14 @@ def worker_process(worker_id: int, url_queue, result_queue, shutdown_event,
                 break
             
             # Process URL with shutdown event passed
+            print(f"[Worker {worker_id}] Processing: {url}")
+            
             result = video_extractor.download_single_video(
                 url,
                 audio_only=download_kwargs.get('audio_only', False),
                 use_whisper=args.whisper,
                 whisper_model=whisper_model,
-                whisper_device='CPU' if args.force_cpu else 'auto',
+                whisper_device=whisper_config.get('device', 'cpu').upper() if whisper_config else 'CPU',
                 shutdown_event=shutdown_event  # Pass shutdown event
             )
         
@@ -822,15 +815,21 @@ async def main():
             print("MS_TOKEN validation failed - continuing without comments")
             processor.ms_token = None
     
-    # Load Whisper model if requested
+    # Setup Whisper configuration (but don't load model in main process for multiprocessing)
     whisper_model = None
     whisper_device = "CPU"
-    if args.whisper:
+    if args.whisper and args.workers == 1:
+        # Only load model in main process for single worker mode
         from src.device_manager import DeviceManager
         whisper_model, whisper_device = load_whisper_model(force_cpu=args.force_cpu)
         if whisper_model:
-            # Print device warning if using multiple workers with CPU
             DeviceManager.print_device_warning(args.workers, whisper_device.lower())
+    elif args.whisper and args.workers > 1:
+        # For multiple workers, just get device config without loading model
+        from src.device_manager import DeviceManager
+        device, _ = DeviceManager.get_whisper_device_config(args.force_cpu)
+        whisper_device = device.upper()
+        print(f"\n✓ Using {args.workers} workers with {whisper_device} acceleration.")
     
     # Prepare download kwargs
     download_kwargs = {
@@ -904,6 +903,13 @@ async def main():
         sys.exit(0)
 
 if __name__ == "__main__":
+    # Set spawn method for CUDA compatibility BEFORE any imports that might use multiprocessing
+    import multiprocessing
+    try:
+        multiprocessing.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass  # Already set
+    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
