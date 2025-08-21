@@ -70,12 +70,26 @@ class CollectorService:
     @staticmethod
     def check_collector_status():
         """Check and log collector status changes"""
+        # First check process status
         if CollectorService._collector_process is not None:
             poll_result = CollectorService._collector_process.poll()
             if poll_result is not None:
                 # Process has finished
                 logger.info(f"✅ Collector process (PID: {CollectorService._collector_process.pid}) has finished with exit code: {poll_result}")
                 CollectorService._collector_process = None
+                
+                # Update database status
+                try:
+                    from django.db import connection
+                    with connection.cursor() as cursor:
+                        cursor.execute("""
+                            UPDATE collector_status 
+                            SET status = 'stopped', stopped_at = NOW()
+                            WHERE id = 1
+                        """)
+                except Exception as e:
+                    logger.warning(f"Could not update collector status in database: {e}")
+                
                 return False
         return CollectorService.is_collector_running()
     
@@ -83,14 +97,46 @@ class CollectorService:
     def is_collector_running() -> bool:
         """
         Check if collector.py is currently running.
+        First checks process, then database status.
         
         Returns:
             True if collector is running, False otherwise
         """
+        # Check process first
         if CollectorService._collector_process is None:
+            # No process tracked, check database
+            try:
+                from django.db import connection
+                with connection.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT status, pid, last_activity 
+                        FROM collector_status 
+                        WHERE id = 1
+                    """)
+                    result = cursor.fetchone()
+                    if result and result[0] == 'running':
+                        # Check if the PID is still alive
+                        pid = result[1]
+                        if pid and psutil.pid_exists(pid):
+                            try:
+                                process = psutil.Process(pid)
+                                cmdline = ' '.join(process.cmdline())
+                                if 'collector.py' in cmdline:
+                                    logger.info(f"Found running collector from database (PID: {pid})")
+                                    return True
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
+                        # PID not alive, update database
+                        cursor.execute("""
+                            UPDATE collector_status 
+                            SET status = 'stopped', stopped_at = NOW()
+                            WHERE id = 1
+                        """)
+            except Exception as e:
+                logger.warning(f"Could not check database collector status: {e}")
             return False
         
-        # Check if the process is still alive
+        # Check if the tracked process is still alive
         if CollectorService._collector_process.poll() is not None:
             # Process has terminated
             CollectorService._collector_process = None
@@ -125,8 +171,12 @@ class CollectorService:
         """
         # Check if collector is already running
         if CollectorService.is_collector_running():
-            logger.info("📋 Collector already running with PID: %s - URL will be processed by existing collector", 
-                       CollectorService._collector_process.pid)
+            # Check pending URLs to give accurate feedback
+            pending_count = QueuedURL.objects.filter(status='pending').count()
+            if pending_count > 0:
+                logger.info("📋 Collector already running - %d URL(s) queued and will be processed", pending_count)
+            else:
+                logger.info("📋 Collector already running - URL will be processed in next cycle")
             return CollectorService._collector_process
         
         # Check if there are pending URLs
@@ -136,9 +186,10 @@ class CollectorService:
             return None
         
         # Log collector start
-        logger.info(f"🚀 Starting collector.py to process {pending_count} pending URL(s)")
+        logger.info(f"🚀 Starting collector.py in continuous mode to process queue")
+        logger.info(f"📊 Current queue: {pending_count} pending URL(s)")
         
-        # Build command - no arguments, uses config.toml
+        # Build command - no arguments, uses config.toml and database queue
         cmd = ['python', 'collector.py']
         
         # Log full command
@@ -156,6 +207,7 @@ class CollectorService:
         CollectorService._collector_process = process
         
         logger.info(f"Collector started with PID: {process.pid}")
+        logger.info("Collector will continuously process the queue until idle")
         
         return process
     
@@ -184,6 +236,31 @@ class CollectorService:
             status='completed',
             processed_at=timezone.now()
         )
+    
+    @staticmethod
+    def get_collector_stats() -> dict:
+        """Get collector statistics from database"""
+        try:
+            from django.db import connection
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT status, started_at, stopped_at, last_activity, urls_processed, pid
+                    FROM collector_status
+                    WHERE id = 1
+                """)
+                result = cursor.fetchone()
+                if result:
+                    return {
+                        'status': result[0],
+                        'started_at': result[1],
+                        'stopped_at': result[2],
+                        'last_activity': result[3],
+                        'urls_processed': result[4],
+                        'pid': result[5]
+                    }
+        except Exception as e:
+            logger.warning(f"Could not get collector stats: {e}")
+        return None
     
     @staticmethod
     def mark_failed(url: str, error_message: str):

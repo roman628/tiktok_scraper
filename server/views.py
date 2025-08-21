@@ -81,13 +81,32 @@ class ProcessingStatusView(APIView):
         completed = QueuedURL.objects.filter(status='completed').count()
         failed = QueuedURL.objects.filter(status='failed').count()
         
-        return Response({
+        # Check if collector is running
+        collector_running = CollectorService.is_collector_running()
+        
+        # Get collector statistics
+        collector_stats = CollectorService.get_collector_stats()
+        
+        response_data = {
+            'collector_running': collector_running,
             'pending': pending,
             'processing': processing,
             'completed': completed,
             'failed': failed,
             'total': pending + processing + completed + failed
-        })
+        }
+        
+        # Add collector stats if available
+        if collector_stats:
+            response_data['collector'] = {
+                'status': collector_stats['status'],
+                'started_at': collector_stats['started_at'],
+                'last_activity': collector_stats['last_activity'],
+                'urls_processed_session': collector_stats['urls_processed'],
+                'pid': collector_stats['pid']
+            }
+        
+        return Response(response_data)
 
 
 class VideoListView(APIView):

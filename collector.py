@@ -807,6 +807,10 @@ async def main():
     args.json_output = None
     
     # Auto-discovery logic - check database queue first
+    # This mode enables continuous processing of the queue
+    database_mode = False
+    db = None
+    
     if 'url' not in cli_provided and 'from_file' not in cli_provided:
         if not args.url and not args.from_file:
             # Check database queue for pending URLs
@@ -822,49 +826,170 @@ async def main():
                         password=db_config.get('password', ''),
                         port=db_config.get('port', 5432)
                     )
+                    database_mode = True
                     
-                    # Get pending URLs from queued_urls table
+                    # Mark collector as running in database
                     with db.get_cursor() as cursor:
                         cursor.execute("""
-                            SELECT url FROM queued_urls 
-                            WHERE status = 'pending'
-                            ORDER BY added_at
-                        """)
-                        pending_urls = cursor.fetchall()
-                        
-                        if pending_urls:
-                            # Update status to processing
-                            url_list = [url[0] for url in pending_urls]
-                            cursor.execute("""
-                                UPDATE queued_urls 
-                                SET status = 'processing'
-                                WHERE url = ANY(%s)
-                            """, (url_list,))
-                            cursor.connection.commit()
+                            INSERT INTO collector_status (status, started_at, pid)
+                            VALUES ('running', NOW(), %s)
+                            ON CONFLICT (id) DO UPDATE
+                            SET status = 'running', started_at = NOW(), pid = %s
+                            WHERE collector_status.id = 1
+                        """, (os.getpid(), os.getpid()))
+                        cursor.connection.commit()
+                    
+                    # Apply defaults if not in config
+                    if 'mp3' not in cli_provided:
+                        if not ('download' in config and 'audio_only' in config['download']):
+                            args.mp3 = True
                             
-                            # Set URLs for processing
-                            args.url = ','.join(url_list)
-                            print(f"📋 Found {len(url_list)} pending URL(s) in database queue")
-                            
-                            # Apply defaults if not in config
-                            if 'mp3' not in cli_provided:
-                                if not ('download' in config and 'audio_only' in config['download']):
-                                    args.mp3 = True
-                                    
-                            if 'whisper' not in cli_provided:
-                                if not ('download' in config and 'use_whisper' in config['download']):
-                                    args.whisper = True
-                        else:
-                            print("No pending URLs in database queue")
-                            return
+                    if 'whisper' not in cli_provided:
+                        if not ('download' in config and 'use_whisper' in config['download']):
+                            args.whisper = True
                             
                 except Exception as e:
-                    print(f"Error connecting to database queue: {e}")
+                    print(f"Error connecting to database: {e}")
                     return
             else:
                 print("Database is disabled in config.toml")
                 return
     
+    # Database continuous processing loop
+    if database_mode:
+        import time
+        no_urls_count = 0
+        max_idle_iterations = 3  # Exit after 3 checks with no URLs
+        check_interval = 5  # Seconds between checks
+        
+        print("\n🔄 Starting continuous queue processing mode...")
+        print(f"Will check for new URLs every {check_interval} seconds")
+        print("Press Ctrl+C to stop\n")
+        
+        while not shutdown_manager.shutdown_requested:
+            try:
+                # Get pending URLs from queued_urls table
+                with db.get_cursor() as cursor:
+                    cursor.execute("""
+                        SELECT url FROM queued_urls 
+                        WHERE status = 'pending'
+                        ORDER BY added_at
+                        LIMIT 100
+                    """)
+                    pending_urls = cursor.fetchall()
+                    
+                    if pending_urls:
+                        no_urls_count = 0  # Reset idle counter
+                        url_list = [url[0] for url in pending_urls]
+                        
+                        # Update status to processing
+                        cursor.execute("""
+                            UPDATE queued_urls 
+                            SET status = 'processing', processed_at = NOW()
+                            WHERE url = ANY(%s)
+                        """, (url_list,))
+                        cursor.connection.commit()
+                        
+                        print(f"\n📋 Found {len(url_list)} pending URL(s) in database queue")
+                        args.url = ','.join(url_list)
+                        
+                        # Initialize processor for this batch
+                        processor = RobustTikTokProcessor(args, config)
+                        
+                        # Load existing progress
+                        if not args.force_redownload:
+                            processor.load_existing_progress()
+                        
+                        # Get MS_TOKEN
+                        if processor.get_ms_token():
+                            if not await processor.validate_ms_token():
+                                print("MS_TOKEN validation failed - continuing without comments")
+                                processor.ms_token = None
+                        
+                        # Prepare download kwargs
+                        download_kwargs = {
+                            'output_dir': args.output,
+                            'quality': args.quality,
+                            'audio_only': args.mp3,
+                            'use_whisper': args.whisper,
+                            'proxy': args.proxy
+                        }
+                        
+                        # Fix 1: Handle comma-separated URLs properly
+                        if ',' in args.url:
+                            urls = args.url.split(',')
+                        else:
+                            urls = [args.url]
+                        
+                        # Filter duplicates
+                        original_count = len(urls)
+                        urls = processor.filter_urls(urls)
+                        
+                        if urls:
+                            print(f"Processing {len(urls)} of {original_count} URLs")
+                            
+                            # Process URLs using unified worker-based approach
+                            await processor.process_urls(urls, download_kwargs)
+                            
+                            # Mark processed URLs as completed
+                            with db.get_cursor() as cursor:
+                                for url in urls:
+                                    if url not in processor.state.failed_urls:
+                                        cursor.execute("""
+                                            UPDATE queued_urls 
+                                            SET status = 'completed', processed_at = NOW()
+                                            WHERE url = %s
+                                        """, (url,))
+                                    else:
+                                        cursor.execute("""
+                                            UPDATE queued_urls 
+                                            SET status = 'failed', error_message = 'Processing failed', processed_at = NOW()
+                                            WHERE url = %s
+                                        """, (url,))
+                                cursor.connection.commit()
+                            
+                            print(f"✅ Batch completed: {len(urls)} URL(s) processed")
+                            
+                            # Update collector status
+                            with db.get_cursor() as cursor:
+                                cursor.execute("""
+                                    UPDATE collector_status
+                                    SET last_activity = NOW(), urls_processed = urls_processed + %s
+                                    WHERE id = 1
+                                """, (len(urls),))
+                                cursor.connection.commit()
+                        else:
+                            print(f"All {original_count} URLs already processed")
+                    else:
+                        no_urls_count += 1
+                        if no_urls_count >= max_idle_iterations:
+                            print(f"\n📭 No new URLs found after {max_idle_iterations} checks. Exiting...")
+                            break
+                        else:
+                            print(f"⏳ No pending URLs found (check {no_urls_count}/{max_idle_iterations}). Waiting {check_interval} seconds...")
+                            await asyncio.sleep(check_interval)
+                            
+            except Exception as e:
+                print(f"Error in processing loop: {e}")
+                await asyncio.sleep(check_interval)
+        
+        # Mark collector as stopped
+        if db:
+            try:
+                with db.get_cursor() as cursor:
+                    cursor.execute("""
+                        UPDATE collector_status
+                        SET status = 'stopped', stopped_at = NOW()
+                        WHERE id = 1
+                    """)
+                    cursor.connection.commit()
+                print("\n✅ Collector status updated to 'stopped'")
+            except Exception as e:
+                print(f"Warning: Could not update collector status: {e}")
+        
+        return  # Exit after database mode processing
+    
+    # Regular mode (single batch from file or URL argument)
     # Initialize processor with config
     processor = RobustTikTokProcessor(args, config)
     
@@ -903,7 +1028,11 @@ async def main():
         if args.limit:
             urls = urls[:args.limit]
     else:
-        urls = [args.url]
+        # Fix 1: Handle comma-separated URLs properly
+        if ',' in args.url:
+            urls = args.url.split(',')
+        else:
+            urls = [args.url]
         processor.source_file = None
     
     if not urls:
