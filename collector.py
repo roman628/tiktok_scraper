@@ -874,7 +874,6 @@ async def main():
                         SELECT url FROM queued_urls 
                         WHERE status = 'pending'
                         ORDER BY added_at
-                        LIMIT 100
                     """)
                     pending_urls = cursor.fetchall()
                     
