@@ -199,6 +199,7 @@ class WorkerProgress:
     
     def start_transcription(self, model: str = 'base'):
         """Start transcription"""
+        self._last_logged_percent = 0  # Reset for new transcription
         self.send_progress('transcribing', 0)
         self.send_log(f'Starting transcription with Whisper {model}', 'progress')
     
@@ -211,6 +212,17 @@ class WorkerProgress:
                 progress,
                 f"Progress: {current_time:.0f}/{total_time:.0f} seconds"
             )
+            
+            # Also send console log every 10% progress
+            progress_int = int(progress)
+            if progress_int > 0 and progress_int % 10 == 0:
+                # Check if we haven't already logged this percentage
+                if not hasattr(self, '_last_logged_percent') or self._last_logged_percent < progress_int:
+                    self._last_logged_percent = progress_int
+                    self.send_log(
+                        f"Transcribing: {progress_int}% ({current_time:.0f}/{total_time:.0f}s)",
+                        'progress'
+                    )
     
     def complete_transcription(self, duration: float):
         """Complete transcription"""

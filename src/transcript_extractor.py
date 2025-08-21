@@ -59,11 +59,12 @@ class TranscriptExtractor:
                 )
                 print(f"Loaded faster-whisper model: {self.model_size} on CPU")
     
-    def extract_transcript(self, video_path: str) -> str:
-        """Extract transcript from video file.
+    def extract_transcript(self, video_path: str, progress_callback=None) -> str:
+        """Extract transcript from video file with progress tracking.
         
         Args:
             video_path: Path to the video file
+            progress_callback: Optional callback for progress updates
             
         Returns:
             Transcript text or empty string if extraction fails
@@ -87,7 +88,11 @@ class TranscriptExtractor:
                 condition_on_previous_text=False
             )
             
-            # Process segments in chunks, checking for shutdown
+            # Get total duration for progress calculation
+            total_duration = info.duration if hasattr(info, 'duration') else 0
+            current_time = 0.0
+            
+            # Process segments incrementally with progress updates
             for i, segment in enumerate(segments):
                 # Check shutdown every 10 segments
                 if i % 10 == 0 and self.shutdown_event and self.shutdown_event.is_set():
@@ -95,6 +100,15 @@ class TranscriptExtractor:
                     break
                 
                 segments_list.append(segment.text.strip())
+                
+                # Update progress based on segment end time
+                if progress_callback and total_duration > 0:
+                    current_time = segment.end
+                    progress_callback.update_transcription(current_time, total_duration)
+            
+            # Ensure we report 100% completion
+            if progress_callback and total_duration > 0:
+                progress_callback.update_transcription(total_duration, total_duration)
             
             # Combine segments into full transcript
             transcript = " ".join(segments_list)

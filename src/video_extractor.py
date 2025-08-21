@@ -112,17 +112,17 @@ class VideoExtractor:
             # Transcribe if requested
             if use_whisper:
                 if progress_callback:
-                    progress_callback.send_progress('transcribing', 10)
-                    progress_callback.send_log("Starting transcription...", 'progress')
+                    progress_callback.start_transcription('small.en' if whisper_model else 'base')
                 
-                transcript = self._transcribe_video(download_path, whisper_model, whisper_device)
+                transcript = self._transcribe_video(download_path, whisper_model, whisper_device, progress_callback)
                 if transcript:
                     metadata['whisper_transcription'] = transcript
                     metadata['transcription_timestamp'] = datetime.now().isoformat()
                     
                     if progress_callback:
-                        progress_callback.send_progress('transcribing', 90)
-                        progress_callback.send_log("Transcription completed", 'success')
+                        # Use complete_transcription which handles progress and logging
+                        duration = metadata.get('duration', 0)
+                        progress_callback.complete_transcription(duration)
             
             # Save metadata
             metadata_path = video_folder / 'metadata.json'
@@ -263,29 +263,48 @@ class VideoExtractor:
             print(f"Download error: {e}")
             return None
     
-    def _transcribe_video(self, video_path: Path, whisper_model: Any, device: str) -> str:
-        """Transcribe video using local Whisper model."""
+    def _transcribe_video(self, video_path: Path, whisper_model: Any, device: str, progress_callback=None) -> str:
+        """Transcribe video using local Whisper model with progress tracking."""
         if whisper_model:
             # Use provided model directly (faster-whisper only)
             try:
-                segments, _ = whisper_model.transcribe(
+                segments, info = whisper_model.transcribe(
                     str(video_path),
                     beam_size=5,
                     language="en",
                     condition_on_previous_text=False
                 )
-                return " ".join([segment.text.strip() for segment in segments])
+                
+                # Get total duration for progress calculation
+                total_duration = info.duration if hasattr(info, 'duration') else 0
+                current_time = 0.0
+                segments_list = []
+                
+                # Process segments incrementally with progress updates
+                for segment in segments:
+                    segments_list.append(segment.text.strip())
+                    
+                    # Update progress based on segment end time
+                    if progress_callback and total_duration > 0:
+                        current_time = segment.end
+                        progress_callback.update_transcription(current_time, total_duration)
+                
+                # Ensure we report 100% completion
+                if progress_callback and total_duration > 0:
+                    progress_callback.update_transcription(total_duration, total_duration)
+                
+                return " ".join(segments_list)
             except Exception as e:
                 print(f"Transcription error with provided model: {e}")
                 return ""
         else:
-            # Use TranscriptExtractor
+            # Use TranscriptExtractor with progress callback
             if not self.transcript_extractor:
                 self.transcript_extractor = TranscriptExtractor(
                     device=device.lower(),
                     shutdown_event=self.shutdown_event
                 )
-            return self.transcript_extractor.extract_transcript(str(video_path))
+            return self.transcript_extractor.extract_transcript(str(video_path), progress_callback)
     
     def _sanitize_filename(self, filename: str) -> str:
         """Sanitize filename for filesystem compatibility."""
