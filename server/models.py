@@ -88,8 +88,14 @@ class MLTrainingRun(models.Model):
     """Track ML model training runs"""
     trained_at = models.DateTimeField(auto_now_add=True)
     model_name = models.CharField(max_length=100)
+    model_version = models.CharField(max_length=20, blank=True, null=True)
     accuracy = models.FloatField(null=True, blank=True)
     training_samples = models.IntegerField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=[
+        ('running', 'Running'),
+        ('completed', 'Completed'),
+        ('failed', 'Failed')
+    ], default='running')
     model_path = models.CharField(max_length=255, blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
 
