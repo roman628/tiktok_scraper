@@ -131,416 +131,127 @@ class RobustTikTokProcessor:
         return filtered
     
     async def process_urls(self, urls: List[str], download_kwargs: Dict[str, Any]):
-        """Process list of URLs."""
+        """Process all URLs using worker processes (even if just 1 worker)."""
         self.state.total_urls = len(urls)
+        print(f"\nProcessing {len(urls)} URLs with {self.args.workers} worker(s)...")
         
-        # Create display manager for single worker
+        # Setup multiprocessing components
+        manager = mp.Manager()
+        url_queue = manager.Queue()
+        result_queue = manager.Queue()
+        display_queue = manager.Queue()
+        shutdown_event = manager.Event()
+        
+        # Add URLs to queue
+        for url in urls:
+            url_queue.put(url)
+        
+        # Add sentinel values
+        for _ in range(self.args.workers):
+            url_queue.put(None)
+        
+        # Setup display
         display_mode = getattr(self.args, 'display_mode', 'auto')
         raw_log_path = None
         if getattr(self.args, 'raw_log', False):
             raw_log_path = f"processing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         
         display_manager = create_display(
-            1,  # Single worker
+            self.args.workers,
             len(urls),
             mode=display_mode,
             raw_log_path=raw_log_path
         )
-        
-        # Create display queue
-        display_queue = queue.Queue()
-        
-        # Initialize progress tracker
-        progress = WorkerProgress(0, display_queue, len(urls))
-        
-        # Start display
         display_manager.start()
         
-        # Create a separate thread to update display continuously
-        import threading
-        display_running = threading.Event()
-        display_running.set()
+        # Setup Whisper config if needed
+        whisper_config = None
+        if self.args.whisper:
+            from src.device_manager import DeviceManager
+            device_manager = DeviceManager()
+            device = device_manager.get_best_device(force_cpu=self.args.force_cpu)
+            whisper_config = {
+                'model_size': getattr(self.args, 'whisper_model', 'small.en'),
+                'device': device.lower(),
+                'compute_type': 'float16' if device.lower() in ['cuda', 'mps'] else 'int8'
+            }
         
-        def update_display_thread():
-            while display_running.is_set():
-                # Process all queued updates
-                while not display_queue.empty():
-                    try:
-                        update = display_queue.get_nowait()
-                        display_manager.process_update(update)
-                    except:
-                        pass
-                # Update the display
-                display_manager.update()
-                time.sleep(0.1)  # Update 10 times per second
+        # Create workers
+        workers = []
+        for i in range(self.args.workers):
+            p = mp.Process(
+                target=worker_process_wrapper,
+                args=(i, url_queue, result_queue, display_queue, shutdown_event,
+                      self.args, download_kwargs, self.ms_token, whisper_config, len(urls))
+            )
+            p.start()
+            workers.append(p)
         
-        display_thread = threading.Thread(target=update_display_thread, daemon=True)
-        display_thread.start()
+        # Process results
+        processed = 0
+        failed = 0
+        workers_done = 0
         
         try:
-            for i, url in enumerate(urls):
+            while workers_done < self.args.workers:
+                # Update display
+                while not display_queue.empty():
+                    try:
+                        msg = display_queue.get_nowait()
+                        display_manager.process_update(msg)
+                    except queue.Empty:
+                        break
+                
+                display_manager.update()
+                
+                # Process results
+                try:
+                    result = result_queue.get(timeout=0.1)
+                    if result is None:
+                        workers_done += 1
+                    elif result['success']:
+                        processed += 1
+                        self.state.processed_urls = processed
+                    else:
+                        failed += 1
+                        self.state.failed_urls.append(result.get('url', 'unknown'))
+                        if result.get('deleted') and self.source_file:
+                            URLProcessor.remove_url_from_file(result['url'], self.source_file)
+                except queue.Empty:
+                    continue
+                
+                # Check for shutdown
                 if self.shutdown_requested:
-                    progress.send_log("Shutdown requested, stopping processing", 'info')
+                    shutdown_event.set()
                     break
-                
-                # Start processing URL
-                progress.start_url(url)
-                
-                # Process single URL with progress tracking
-                result = await self.process_single_url(url, download_kwargs, progress)
-                
-                if result:
-                    self.state.processed_urls += 1
-                    progress.complete_url()
-                else:
-                    self.state.failed_urls.append(url)
-                    progress.report_error('processing', 'Failed to process URL')
-                
-                # Save progress periodically
-                if (i + 1) % self.args.batch_size == 0:
-                    self.save_progress()
-                
-                # Delay between requests
-                if i < len(urls) - 1:
-                    time.sleep(self.args.delay)
-                
-                # Memory cleanup
-                if (i + 1) % 3 == 0:
-                    self.resource_manager.check_memory_and_cleanup()
+        
+        except KeyboardInterrupt:
+            print("\nShutdown requested...")
+            shutdown_event.set()
+        
         finally:
-            # Stop display thread
-            display_running.clear()
-            display_thread.join(timeout=1)
+            # Wait for workers to finish
+            shutdown_event.set()
+            for p in workers:
+                p.join(timeout=5)
+                if p.is_alive():
+                    p.terminate()
             
             # Stop display
             display_manager.stop()
             
-            # Final save
+            # Final stats
             self.save_progress()
-            print(f"\nCompleted: {self.state.processed_urls}/{self.state.total_urls} URLs processed")
+            print(f"\nCompleted: {processed}/{len(urls)} URLs processed, {failed} failed")
     
-    async def process_single_url(self, url: str, download_kwargs: Dict[str, Any], 
-                                 progress: Optional[WorkerProgress] = None) -> bool:
-        """Process a single TikTok URL."""
-        # Check if URL was already processed
-        if url in self.data_manager.existing_urls:
-            if progress:
-                progress.send_log("Skipping duplicate", 'info')
-            else:
-                print(f"⏭️  Skipping duplicate: {url}")
-            return True  # Return True since it's already processed
-        
-        try:
-            # Start download stage
-            if progress:
-                progress.start_download()
-            else:
-                print("Downloading video...")
-            
-            # Download video and extract metadata
-            video_result = self.video_extractor.download_single_video(
-                url,
-                audio_only=download_kwargs.get('audio_only', False),
-                use_whisper=download_kwargs.get('use_whisper', False),
-                whisper_model=download_kwargs.get('whisper_model'),
-                whisper_device=download_kwargs.get('whisper_device', 'CPU'),
-                progress_callback=progress
-            )
-            
-            # Update progress after download
-            if progress:
-                progress.send_progress('downloading', 100)
-                progress.send_log("Download complete", 'success')
-            
-            if not video_result['success']:
-                error_msg = video_result.get('error', '')
-                if progress:
-                    progress.report_error('download', error_msg)
-                else:
-                    print(f"Download failed: {error_msg}")
-                
-                # Check if this is a deleted/private video
-                if video_result.get('deleted'):
-                    # Remove from source file if we have one
-                    if self.source_file:
-                        URLProcessor.remove_url_from_file(url, self.source_file)
-                
-                return False
-            
-            metadata = video_result['metadata']
-            
-            # Report metadata extraction
-            if progress:
-                progress.start_metadata_extraction()
-                progress.send_log("Processing metadata...", 'progress')
-                if 'likes' in metadata:
-                    progress.complete_metadata(
-                        metadata.get('likes', 0),
-                        metadata.get('comment_count', 0)
-                    )
-                else:
-                    progress.send_progress('metadata', 100)
-                    progress.send_log("Metadata extracted", 'success')
-            
-            # Extract transcript from metadata if present
-            transcript = metadata.get('whisper_transcription', '')
-            if progress:
-                if transcript:
-                    # Transcription was done
-                    progress.send_progress('transcribing', 100)
-                    progress.complete_transcription(metadata.get('duration', 0))
-                elif download_kwargs.get('use_whisper', False):
-                    # Whisper was enabled but no transcript
-                    progress.skip_transcription("No audio found")
-                else:
-                    # Whisper not enabled
-                    progress.skip_transcription("Whisper not enabled")
-            
-            # Extract comments if MS_TOKEN is available
-            comments = []
-            if self.comment_extractor and self.ms_token:
-                if progress:
-                    progress.start_comments()
-                else:
-                    print("Extracting comments...")
-                try:
-                    comment_objects = await self.comment_extractor.extract_comments(url)
-                    comments = [comment.to_dict() for comment in comment_objects]
-                    if progress:
-                        progress.complete_comments(len(comments))
-                    else:
-                        print(f"Extracted {len(comments)} comments")
-                except Exception as e:
-                    if progress:
-                        progress.report_error('comments', str(e))
-                    else:
-                        print(f"Comment extraction failed: {e}")
-            
-            # Create flattened data structure (all fields at top level)
-            video_data = {
-                'title': metadata.get('title', ''),
-                'description': metadata.get('description', ''),
-                'duration': metadata.get('duration', 0),
-                'video_id': metadata.get('video_id', ''),
-                'url': url,
-                'uploader': metadata.get('uploader', ''),
-                'uploader_id': metadata.get('uploader_id', ''),
-                'uploader_url': metadata.get('uploader_url', ''),
-                'view_count': metadata.get('view_count', 0),
-                'like_count': metadata.get('like_count', 0),
-                'comment_count': metadata.get('comment_count', 0),
-                'repost_count': metadata.get('repost_count', 0),
-                'hashtags': metadata.get('hashtags', []),
-                'upload_date': metadata.get('upload_date', ''),
-                'timestamp': metadata.get('timestamp', 0),
-                'width': metadata.get('width', 0),
-                'height': metadata.get('height', 0),
-                'fps': metadata.get('fps', 0),
-                'filesize': metadata.get('filesize', 0),
-                'format': metadata.get('format', ''),
-                'downloaded_at': metadata.get('downloaded_at', ''),
-                'downloaded_with': metadata.get('downloaded_with', ''),
-                'platform': metadata.get('platform', ''),
-                'whisper_transcription': transcript,
-                'transcription_timestamp': metadata.get('transcription_timestamp', ''),
-                'top_comments': comments,
-                'comments_extracted': len(comments) > 0,
-                'comments_extracted_at': datetime.now().isoformat() if comments else ''
-            }
-            
-            # Save to master file
-            if progress:
-                progress.start_saving()
-            self.data_manager.append_to_master(video_data)
-            
-            # Add URL to existing set to prevent reprocessing
-            self.data_manager.existing_urls.add(url)
-            
-            if progress:
-                progress.complete_saving()
-            
-            # Cleanup download folder if needed
-            if self.args.mp3 and video_result.get('folder'):
-                self.resource_manager.cleanup_directory(video_result['folder'])
-            
-            return True
-            
-        except Exception as e:
-            if progress:
-                progress.report_error('processing', str(e))
-            else:
-                print(f"Error processing URL: {e}")
-            return False
+    # process_single_url removed - now using process_tiktok_url in workers
     
     async def cleanup_api_session(self):
         """Clean up API sessions."""
         if self.comment_extractor:
             await self.comment_extractor.cleanup()
 
-class MultiprocessCoordinator:
-    """Coordinator for multiprocess data collection."""
-    
-    def __init__(self, args, ms_token: Optional[str] = None):
-            
-        self.args = args
-        self.ms_token = ms_token
-        self.num_workers = args.workers
-        self.manager = mp.Manager()
-        self.shared_state = self.manager.dict()
-        self.url_queue = self.manager.Queue()
-        self.result_queue = self.manager.Queue()
-        self.display_queue = self.manager.Queue()  # For display updates
-        self.shutdown_event = self.manager.Event()
-        self.whisper_config = None
-        self.display_manager = None
-        
-        # Setup Whisper configuration
-        if args.whisper:
-            print("Setting up Whisper model configuration...")
-            from src.device_manager import DeviceManager
-            device, compute_type = DeviceManager.get_whisper_device_config(args.force_cpu)
-            
-            # Handle MPS
-            if device == "mps":
-                device = "cpu"
-                compute_type = "int8"
-            
-            self.whisper_config = {
-                'model_size': 'small.en',
-                'device': device,
-                'compute_type': compute_type,
-                'force_cpu': args.force_cpu
-            }
-            
-            # Each worker will load its own Whisper model
-            print(f"✓ Each of {self.num_workers} workers will load Whisper model: {self.whisper_config['model_size']}")
-            print(f"✓ Device: {device.upper()}, Compute: {compute_type}")
-    
-    async def process_urls_multiprocess(self, urls: List[str], download_kwargs: Dict[str, Any], 
-                                       master_file: str, source_file: Optional[str]):
-        """Process URLs using multiple worker processes."""
-        # Initialize shared state
-        self.shared_state['total'] = len(urls)
-        self.shared_state['processed'] = 0
-        self.shared_state['failed'] = 0
-        
-        # Determine display mode based on args
-        display_mode = getattr(self.args, 'display_mode', 'auto')
-        raw_log_path = None
-        if getattr(self.args, 'raw_log', False):
-            raw_log_path = f"processing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        
-        # Create display manager
-        self.display_manager = create_display(
-            self.num_workers, 
-            len(urls),
-            mode=display_mode,
-            raw_log_path=raw_log_path
-        )
-        
-        # Add URLs to queue
-        for url in urls:
-            self.url_queue.put(url)
-        
-        # Distribute URLs evenly to workers for progress tracking
-        base_urls_per_worker = len(urls) // self.num_workers
-        extra_urls = len(urls) % self.num_workers
-        
-        # Start display
-        self.display_manager.start()
-        
-        # Start worker processes
-        workers = []
-        url_start_idx = 0
-        for i in range(self.num_workers):
-            # Calculate URLs for this worker - distribute evenly
-            worker_url_count = base_urls_per_worker + (1 if i < extra_urls else 0)
-            
-            worker = mp.Process(
-                target=worker_process_wrapper,
-                args=(i, self.url_queue, self.result_queue, self.display_queue, 
-                     self.shutdown_event, self.args, download_kwargs, self.ms_token, 
-                     self.whisper_config, worker_url_count)
-            )
-            worker.start()
-            workers.append(worker)
-            url_start_idx += worker_url_count
-        
-        # Collect results
-        data_manager = DataManager(master_file)
-        processed_count = 0
-        
-        try:
-            while processed_count < len(urls) and not self.shutdown_event.is_set():
-                # Check for display updates (non-blocking)
-                try:
-                    while True:
-                        display_update = self.display_queue.get_nowait()
-                        self.display_manager.process_update(display_update)
-                except queue.Empty:
-                    pass
-                
-                # Update display
-                self.display_manager.update()
-                
-                # Check for results
-                try:
-                    result = self.result_queue.get(timeout=0.1)  # Shorter timeout for display updates
-                    
-                    # Check for sentinel value indicating worker shutdown
-                    if result is None:
-                        continue
-                    
-                    if result and result.get('success'):
-                        data_manager.append_to_master(result['data'])
-                        self.shared_state['processed'] += 1
-                    else:
-                        # Check if it's a deleted video
-                        if result and result.get('deleted') and source_file:
-                            url = result.get('url')
-                            if url:
-                                URLProcessor.remove_url_from_file(url, source_file)
-                        self.shared_state['failed'] += 1
-                    processed_count += 1
-                        
-                except queue.Empty:
-                    # Check shutdown status during timeout
-                    if self.shutdown_event.is_set():
-                        break
-                    continue
-                except Exception as e:
-                    if self.shutdown_event.is_set():
-                        break
-                    continue
-                    
-        except KeyboardInterrupt:
-            print("\nShutting down workers gracefully...")
-            self.shutdown_event.set()
-        finally:
-            # Stop display
-            if self.display_manager:
-                self.display_manager.stop()
-            
-            # Send poison pills to wake up any blocking queue operations
-            for _ in range(self.num_workers):
-                try:
-                    self.url_queue.put(None, timeout=0.1)
-                except:
-                    pass
-        
-        # Wait for workers to finish
-        for worker in workers:
-            worker.join(timeout=10)  # Give workers 10 seconds to finish gracefully
-            if worker.is_alive():
-                print(f"Worker {worker.pid} not responding, terminating...")
-                worker.terminate()
-                worker.join(timeout=2)  # Wait briefly for termination
-                if worker.is_alive():
-                    print(f"Worker {worker.pid} still alive, force killing...")
-                    worker.kill()
-        
-        print(f"Multiprocessing complete: {self.shared_state['processed']} successful, "
-              f"{self.shared_state['failed']} failed")
+# MultiprocessCoordinator class removed - functionality merged into RobustTikTokProcessor
 
 def load_cached_whisper_model(model_config: Dict[str, Any]):
     """Load Whisper model using configuration.
@@ -591,6 +302,143 @@ def worker_process_wrapper(worker_id: int, url_queue, result_queue, display_queu
         # Let the shutdown event handle termination
         pass
 
+async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
+                             comment_extractor: Optional[CommentExtractor],
+                             data_manager: DataManager,
+                             progress: WorkerProgress,
+                             download_kwargs: Dict[str, Any],
+                             args,
+                             ms_token: Optional[str],
+                             whisper_config: Optional[Dict[str, Any]] = None,
+                             shutdown_event: Optional[mp.Event] = None) -> Dict[str, Any]:
+    """Process a single TikTok URL with consistent flattened output.
+    
+    Returns:
+        Dict with 'success' bool and 'video_data' if successful or 'error' if failed.
+    """
+    # Check for duplicate
+    if data_manager.is_duplicate(url):
+        progress.send_log("Skipping duplicate", 'info')
+        return {'success': True, 'duplicate': True}
+    
+    # Check shutdown
+    if shutdown_event and shutdown_event.is_set():
+        return {'success': False, 'error': 'Shutdown requested'}
+    
+    try:
+        # Download video
+        progress.start_download()
+        
+        # Setup whisper model if needed
+        whisper_model = None
+        if args.whisper and whisper_config:
+            whisper_model = whisper_config.get('model')
+        
+        video_result = video_extractor.download_single_video(
+            url,
+            audio_only=download_kwargs.get('audio_only', False),
+            use_whisper=download_kwargs.get('use_whisper', False),
+            whisper_model=whisper_model,
+            whisper_device=whisper_config.get('device', 'CPU').upper() if whisper_config else 'CPU',
+            shutdown_event=shutdown_event,
+            progress_callback=progress
+        )
+        
+        progress.send_progress('downloading', 100)
+        
+        if not video_result['success']:
+            error_msg = video_result.get('error', 'Download failed')
+            progress.report_error('download', error_msg)
+            
+            # Handle deleted videos
+            if video_result.get('deleted'):
+                return {'success': False, 'error': error_msg, 'deleted': True}
+            return {'success': False, 'error': error_msg}
+        
+        metadata = video_result['metadata']
+        
+        # Extract metadata
+        progress.start_metadata_extraction()
+        progress.send_log("Processing metadata...", 'progress')
+        if 'likes' in metadata:
+            progress.complete_metadata(
+                metadata.get('likes', 0),
+                metadata.get('comment_count', 0)
+            )
+        else:
+            progress.send_progress('metadata', 100)
+            progress.send_log("Metadata extracted", 'success')
+        
+        # Handle transcription
+        transcript = metadata.get('whisper_transcription', '')
+        if transcript:
+            progress.send_progress('transcribing', 100)
+            progress.complete_transcription(metadata.get('duration', 0))
+        elif download_kwargs.get('use_whisper', False):
+            progress.skip_transcription("No audio found")
+        else:
+            progress.skip_transcription("Whisper not enabled")
+        
+        # Extract comments if available
+        comments = []
+        if comment_extractor and ms_token and (not shutdown_event or not shutdown_event.is_set()):
+            progress.start_comments()
+            try:
+                comment_objects = await comment_extractor.extract_comments(url)
+                comments = [comment.to_dict() for comment in comment_objects]
+                progress.complete_comments(len(comments))
+            except Exception as e:
+                progress.report_error('comments', str(e))
+        
+        # Create FLATTENED data structure (matching single worker output)
+        video_data = {
+            'title': metadata.get('title', ''),
+            'description': metadata.get('description', ''),
+            'duration': metadata.get('duration', 0),
+            'video_id': metadata.get('video_id', ''),
+            'url': url,
+            'uploader': metadata.get('uploader', ''),
+            'uploader_id': metadata.get('uploader_id', ''),
+            'uploader_url': metadata.get('uploader_url', ''),
+            'view_count': metadata.get('view_count', 0),
+            'like_count': metadata.get('like_count', 0),
+            'comment_count': metadata.get('comment_count', 0),
+            'repost_count': metadata.get('repost_count', 0),
+            'hashtags': metadata.get('hashtags', []),
+            'upload_date': metadata.get('upload_date', ''),
+            'timestamp': metadata.get('timestamp', 0),
+            'width': metadata.get('width', 0),
+            'height': metadata.get('height', 0),
+            'fps': metadata.get('fps', 0),
+            'filesize': metadata.get('filesize', 0),
+            'format': metadata.get('format', ''),
+            'downloaded_at': metadata.get('downloaded_at', ''),
+            'downloaded_with': metadata.get('downloaded_with', ''),
+            'platform': metadata.get('platform', ''),
+            'whisper_transcription': transcript,
+            'transcription_timestamp': metadata.get('transcription_timestamp', ''),
+            'top_comments': comments,
+            'comments_extracted': len(comments) > 0,
+            'comments_extracted_at': datetime.now().isoformat() if comments else ''
+        }
+        
+        # Save to master file
+        progress.start_saving()
+        data_manager.append_to_master(video_data)
+        data_manager.existing_urls.add(url)
+        progress.complete_saving()
+        
+        # Cleanup if needed
+        if args.mp3 and video_result.get('folder'):
+            ResourceManager().cleanup_directory(video_result['folder'])
+        
+        return {'success': True, 'video_data': video_data}
+        
+    except Exception as e:
+        progress.report_error('processing', str(e))
+        return {'success': False, 'error': str(e)}
+
+
 async def worker_process(worker_id: int, url_queue, result_queue, display_queue, 
                   shutdown_event, args, download_kwargs: Dict[str, Any], 
                   ms_token: Optional[str], whisper_config: Dict[str, Any] = None,
@@ -619,14 +467,20 @@ async def worker_process(worker_id: int, url_queue, result_queue, display_queue,
     comment_extractor = None
     if ms_token:
         comment_extractor = CommentExtractor(ms_token=ms_token, max_comments=args.max_comments)
+    
+    # Initialize data manager for this worker
+    data_manager = DataManager(args.json_output)
 
     # Setup Whisper
     whisper_model = None
+    whisper_config_with_model = None
     if args.whisper:
         progress.send_log('Loading Whisper model...', 'info')
         if whisper_config:
             whisper_model = load_cached_whisper_model(whisper_config)
             if whisper_model:
+                whisper_config_with_model = whisper_config.copy()
+                whisper_config_with_model['model'] = whisper_model
                 progress.send_log(f"Loaded Whisper model on {whisper_config.get('device', 'cpu').upper()}", 'success')
             else:
                 progress.send_log('Failed to load Whisper model', 'error')
@@ -651,51 +505,35 @@ async def worker_process(worker_id: int, url_queue, result_queue, display_queue,
 
             progress.start_url(url)
             
-            result = video_extractor.download_single_video(
-                url,
-                audio_only=download_kwargs.get('audio_only', False),
-                use_whisper=args.whisper,
-                whisper_model=whisper_model,
-                whisper_device=whisper_config.get('device', 'cpu').upper() if whisper_config else 'CPU',
-                shutdown_event=shutdown_event,
-                progress_callback=progress
+            # Use the unified processing function
+            result = await process_tiktok_url(
+                url=url,
+                video_extractor=video_extractor,
+                comment_extractor=comment_extractor,
+                data_manager=data_manager,
+                progress=progress,
+                download_kwargs=download_kwargs,
+                args=args,
+                ms_token=ms_token,
+                whisper_config=whisper_config_with_model,
+                shutdown_event=shutdown_event
             )
-
+            
             if shutdown_event.is_set():
                 break
-
-            if result['success']:
-                metadata = result.get('metadata', {})
-                comments = []
-                if comment_extractor and not shutdown_event.is_set():
-                    progress.start_comments()
-                    try:
-                        comment_objects = await comment_extractor.extract_comments(url)
-                        comments = [c.to_dict() for c in comment_objects]
-                        progress.complete_comments(len(comments))
-                    except Exception as e:
-                        progress.report_error('comments', str(e))
-
-                progress.start_saving()
-                video_data = {
-                    'url': url,
-                    'video_id': metadata.get('video_id', ''),
-                    'transcript': metadata.get('whisper_transcription', ''),
-                    'metadata': metadata,
-                    'comments': comments
-                }
-                
-                if not shutdown_event.is_set():
-                    result_queue.put({'success': True, 'data': video_data})
-                    progress.complete_saving()
+            
+            # Send result to queue
+            if not shutdown_event.is_set():
+                if result.get('duplicate'):
+                    # Skip duplicates silently
                     progress.complete_url()
-            else:
-                error_msg = result.get('error', 'Unknown error')
-                progress.report_error('processing', error_msg)
-                if not shutdown_event.is_set():
+                elif result['success']:
+                    result_queue.put({'success': True, 'data': result['video_data']})
+                    progress.complete_url()
+                else:
                     result_queue.put({
-                        'success': False, 
-                        'error': error_msg,
+                        'success': False,
+                        'error': result.get('error', 'Unknown error'),
                         'deleted': result.get('deleted', False),
                         'url': url
                     })
@@ -977,21 +815,14 @@ async def main():
             print("MS_TOKEN validation failed - continuing without comments")
             processor.ms_token = None
     
-    # Setup Whisper configuration (but don't load model in main process for multiprocessing)
-    whisper_model = None
-    whisper_device = "CPU"
-    if args.whisper and args.workers == 1:
-        # Only load model in main process for single worker mode
-        from src.device_manager import DeviceManager
-        whisper_model, whisper_device = load_whisper_model(force_cpu=args.force_cpu)
-        if whisper_model:
-            DeviceManager.print_device_warning(args.workers, whisper_device.lower())
-    elif args.whisper and args.workers > 1:
-        # For multiple workers, just get device config without loading model
+    # Don't load Whisper model in main process - workers will load their own
+    if args.whisper:
         from src.device_manager import DeviceManager
         device, _ = DeviceManager.get_whisper_device_config(args.force_cpu)
         whisper_device = device.upper()
-        print(f"\n✓ Using {args.workers} workers with {whisper_device} acceleration.")
+        print(f"\n✓ Using {args.workers} worker(s) with {whisper_device} acceleration.")
+    else:
+        whisper_device = "CPU"
     
     # Prepare download kwargs
     download_kwargs = {
@@ -999,8 +830,6 @@ async def main():
         'quality': args.quality,
         'audio_only': args.mp3,
         'use_whisper': args.whisper,
-        'whisper_model': whisper_model,
-        'whisper_device': whisper_device,
         'proxy': args.proxy
     }
     
@@ -1028,28 +857,10 @@ async def main():
     
     print(f"Processing {len(urls)} of {original_count} URLs")
     
-    # Process URLs with shutdown checking
+    # Process URLs using unified worker-based approach
     try:
-        if args.workers <= 1:
-            # Single process mode
-            await processor.process_urls(urls, download_kwargs)
-        else:
-            # Multiprocess mode
-            if not args.from_file:
-                print("Multiprocessing requires --from-file")
-                return
-            
-            coordinator = MultiprocessCoordinator(args, processor.ms_token)
-            coordinator.shutdown_event = shutdown_manager.shutdown_event
-            
-            # Remove model from kwargs for multiprocessing
-            mp_kwargs = download_kwargs.copy()
-            mp_kwargs.pop('whisper_model', None)
-            mp_kwargs.pop('whisper_device', None)
-            
-            await coordinator.process_urls_multiprocess(
-                urls, mp_kwargs, processor.master_file, processor.source_file
-            )
+        # Always use worker processes (even if just 1)
+        await processor.process_urls(urls, download_kwargs)
         
         # Clean up
         auto_clean_master_json(processor.master_file)

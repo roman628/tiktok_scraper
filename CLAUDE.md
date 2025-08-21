@@ -37,9 +37,9 @@ Test report validates:
 ## Architecture Overview
 
 ### Modular System (73% code reduction: 3,200 → 1,140 lines)
-- **collector.py** (~524 lines) - Main orchestrator
-  - `RobustTikTokProcessor`: Single URL processing 
-  - `MultiprocessCoordinator`: Parallel processing
+- **collector.py** (~600 lines) - Main orchestrator
+  - `RobustTikTokProcessor`: Unified processor for all worker modes
+  - `process_tiktok_url`: Core URL processing function with consistent flattened output
 - **src/** - Clean separation of concerns (11 modules):
   - `video_extractor.py` - yt-dlp downloads & metadata extraction
   - `comment_extractor.py` - TikTok API with MS_TOKEN (currently non-functional)
@@ -64,7 +64,8 @@ URLs → Filter Duplicates → Process → {
 
 ### Key Features
 - **Robust Data Handling**: File locking, streaming JSON, duplicate detection, atomic writes
-- **Scalable Processing**: Single/multi-process modes with worker coordination
+- **Unified Processing**: Always uses worker processes (1 to N) with consistent output
+- **Scalable Processing**: Seamless scaling from 1 to multiple workers
 - **Resource Management**: Memory monitoring, automatic cleanup, signal handling
 - **Cross-platform**: Windows/macOS/Linux with platform-specific optimizations
 - **Error Recovery**: Graceful degradation, retry logic, JSON repair
