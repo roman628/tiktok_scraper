@@ -266,8 +266,14 @@ check_dependencies() {
     if [[ -f "$MODEL_FILE" ]]; then
         success "Model file found: $MODEL_FILE"
         
-        # Check model age
-        local model_age=$(( $(date +%s) - $(stat -f %m "$MODEL_FILE" 2>/dev/null || stat -c %Y "$MODEL_FILE" 2>/dev/null || echo 0) ))
+        # Check model age (cross-platform)
+        local model_timestamp=0
+        if [[ "$(uname)" == "Darwin" ]]; then
+            model_timestamp=$(stat -f %m "$MODEL_FILE" 2>/dev/null || echo 0)
+        else
+            model_timestamp=$(stat -c %Y "$MODEL_FILE" 2>/dev/null || echo 0)
+        fi
+        local model_age=$(( $(date +%s) - model_timestamp ))
         local days_old=$(( model_age / 86400 ))
         if [[ $days_old -gt 7 ]]; then
             warnings+=("Model is $days_old days old. Consider retraining.")
@@ -432,8 +438,18 @@ train_model() {
 # API SERVER MANAGEMENT
 # ====================================================================
 
+# PID file location
+PID_FILE="${PID_FILE:-$SCRIPT_DIR/api.pid}"
+
 # Start API server with production-ready configuration
 start_api() {
+    # Check if already running
+    if [[ "$DETACH_MODE" != "true" ]] && check_if_running; then
+        error "API server is already running (PID: $(cat "$PID_FILE"))"
+        error "Use 'stop' command to stop it first"
+        exit 1
+    fi
+    
     log "Starting API server"
     log "Environment: $ENVIRONMENT"
     log "Configuration:"
@@ -475,39 +491,162 @@ start_api() {
     
     cd "$SCRIPT_DIR"
     
-    # Use appropriate server based on environment
-    if [[ "$ENVIRONMENT" == "production" ]] || [[ "$ENVIRONMENT" == "docker" ]]; then
-        # Production: Use Gunicorn with optimized settings
-        log "Starting production server with Gunicorn..."
+    # Handle detached mode
+    if [[ "$DETACH_MODE" == "true" ]]; then
+        log "Starting server in detached mode..."
+        log "Logs will be written to: $LOG_FILE"
         
-        if ! command -v gunicorn &> /dev/null; then
-            error "Gunicorn not installed. Installing..."
-            pip install gunicorn
+        # Start in background and save PID
+        if [[ "$ENVIRONMENT" == "production" ]] || [[ "$ENVIRONMENT" == "docker" ]]; then
+            start_production_server &
+        else
+            start_development_server &
         fi
         
-        exec gunicorn \
-            --bind "$API_HOST:$API_PORT" \
-            --workers "$API_WORKERS" \
-            --timeout "$API_TIMEOUT" \
-            --max-requests "$API_MAX_REQUESTS" \
-            --max-requests-jitter 50 \
-            --access-logfile "$LOG_DIR/access.log" \
-            --error-logfile "$LOG_DIR/error.log" \
-            --log-level "$LOG_LEVEL" \
-            --worker-class sync \
-            --preload \
-            api:app
-    else
-        # Development: Use Flask development server
-        log "Starting development server..."
-        log "API available at: http://localhost:$API_PORT"
-        log "Health check: http://localhost:$API_PORT$HEALTH_CHECK_PATH"
+        local server_pid=$!
+        echo $server_pid > "$PID_FILE"
         
-        $PYTHON_CMD api.py \
-            --host "$API_HOST" \
-            --port "$API_PORT" \
-            --debug 2>&1 | tee -a "$LOG_FILE"
+        # Wait a moment and check if it started successfully
+        sleep 2
+        if kill -0 $server_pid 2>/dev/null; then
+            success "API server started in background (PID: $server_pid)"
+            success "View logs: tail -f $LOG_FILE"
+            success "Stop server: $0 stop"
+            success "Check status: $0 status"
+        else
+            error "Failed to start API server"
+            rm -f "$PID_FILE"
+            exit 1
+        fi
+    else
+        # Run in foreground
+        if [[ "$ENVIRONMENT" == "production" ]] || [[ "$ENVIRONMENT" == "docker" ]]; then
+            start_production_server
+        else
+            start_development_server
+        fi
     fi
+}
+
+# Start production server
+start_production_server() {
+    log "Starting production server with Gunicorn..."
+    
+    if ! command -v gunicorn &> /dev/null; then
+        error "Gunicorn not installed. Installing..."
+        pip install gunicorn
+    fi
+    
+    exec gunicorn \
+        --bind "$API_HOST:$API_PORT" \
+        --workers "$API_WORKERS" \
+        --timeout "$API_TIMEOUT" \
+        --max-requests "$API_MAX_REQUESTS" \
+        --max-requests-jitter 50 \
+        --access-logfile "$LOG_DIR/access.log" \
+        --error-logfile "$LOG_DIR/error.log" \
+        --log-level "$LOG_LEVEL" \
+        --worker-class sync \
+        --preload \
+        api:app >> "$LOG_FILE" 2>&1
+}
+
+# Start development server
+start_development_server() {
+    log "Starting development server..."
+    log "API available at: http://localhost:$API_PORT"
+    log "Health check: http://localhost:$API_PORT$HEALTH_CHECK_PATH"
+    
+    $PYTHON_CMD api.py \
+        --host "$API_HOST" \
+        --port "$API_PORT" >> "$LOG_FILE" 2>&1
+}
+
+# Check if server is running
+check_if_running() {
+    if [[ -f "$PID_FILE" ]]; then
+        local pid=$(cat "$PID_FILE")
+        if kill -0 $pid 2>/dev/null; then
+            return 0  # Running
+        else
+            # PID file exists but process is dead
+            rm -f "$PID_FILE"
+        fi
+    fi
+    return 1  # Not running
+}
+
+# Stop the API server
+stop_api() {
+    if [[ ! -f "$PID_FILE" ]]; then
+        warning "No PID file found. Server may not be running."
+        return 1
+    fi
+    
+    local pid=$(cat "$PID_FILE")
+    
+    if kill -0 $pid 2>/dev/null; then
+        log "Stopping API server (PID: $pid)..."
+        
+        # Try graceful shutdown first
+        kill -TERM $pid 2>/dev/null
+        
+        # Wait up to 10 seconds for graceful shutdown
+        local count=0
+        while kill -0 $pid 2>/dev/null && [[ $count -lt 10 ]]; do
+            sleep 1
+            count=$((count + 1))
+        done
+        
+        # Force kill if still running
+        if kill -0 $pid 2>/dev/null; then
+            warning "Graceful shutdown failed. Force killing..."
+            kill -9 $pid 2>/dev/null
+        fi
+        
+        rm -f "$PID_FILE"
+        success "API server stopped"
+    else
+        warning "Process $pid not found. Cleaning up PID file."
+        rm -f "$PID_FILE"
+    fi
+}
+
+# Check server status
+check_status() {
+    if check_if_running; then
+        local pid=$(cat "$PID_FILE")
+        success "API server is running (PID: $pid)"
+        
+        # Check if port is actually listening
+        if command -v lsof &> /dev/null; then
+            if lsof -Pi :$API_PORT -sTCP:LISTEN -t >/dev/null 2>&1; then
+                log "Port $API_PORT is listening"
+            else
+                warning "Port $API_PORT is not listening (server may be starting)"
+            fi
+        fi
+        
+        # Show recent logs
+        if [[ -f "$LOG_FILE" ]]; then
+            log "Recent logs:"
+            tail -n 5 "$LOG_FILE"
+        fi
+        
+        return 0
+    else
+        warning "API server is not running"
+        return 1
+    fi
+}
+
+# Restart the server
+restart_api() {
+    log "Restarting API server..."
+    stop_api
+    sleep 2
+    DETACH_MODE="${DETACH_MODE:-true}"
+    start_api
 }
 
 # ====================================================================
@@ -570,6 +709,9 @@ Usage: $0 [COMMAND] [OPTIONS]
 
 Commands:
     start, api          Start the API server (default)
+    stop               Stop the API server
+    restart            Restart the API server
+    status             Check server status
     train              Train the model
     validate           Run validation checks
     health             Run health check
@@ -578,6 +720,7 @@ Commands:
     help               Show this help message
 
 Options:
+    --detach           Run server in background (detached mode)
     --env=ENV          Set environment (local|development|production|docker)
     --port=PORT        Override API port
     --data=PATH        Override data file path
@@ -594,10 +737,12 @@ Environment Variables:
     LOG_LEVEL          Logging level (DEBUG|INFO|WARN|ERROR)
 
 Examples:
-    $0                                    # Start API with auto-discovery
+    $0 --detach                           # Start API in background
+    $0 stop                               # Stop background server
+    $0 status                             # Check if server is running
+    $0 restart                            # Restart the server
     $0 --env=production --port=8000      # Production mode on port 8000
     $0 train --force                      # Force retrain model
-    $0 validate                           # Check configuration
     DATA_PATH=/custom/data.json $0       # Use custom data path
 
 Environment Files:
@@ -616,8 +761,13 @@ EOF
 main() {
     # Parse command line arguments
     COMMAND=""
+    DETACH_MODE="false"
     while [[ $# -gt 0 ]]; do
         case $1 in
+            --detach)
+                DETACH_MODE="true"
+                shift
+                ;;
             --env=*)
                 ENVIRONMENT="${1#*=}"
                 shift
@@ -662,6 +812,15 @@ main() {
     case "$COMMAND" in
         start|api)
             start_api
+            ;;
+        stop)
+            stop_api
+            ;;
+        restart)
+            restart_api
+            ;;
+        status)
+            check_status
             ;;
         train)
             DATA_FILE="$(find_data_file)" || { error "Data file not found"; exit 1; }

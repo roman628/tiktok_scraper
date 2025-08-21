@@ -1,7 +1,7 @@
 # TikTok Scraper - Clean Modular Architecture
 
 ## Project Overview
-**Pipeline**: `firefox extension → urls.txt → collector.py → master2.json → clean data → ML model`
+**Pipeline**: `firefox extension → urls.txt → collector.py → PostgreSQL/master2.json → clean data → ML model`
 
 **Goal**: Dockerized portable system running automatically with URL input from extension, outputting trained model and insights.
 
@@ -9,7 +9,8 @@
 ```
 extension/        # Firefox extension
 ml/              # ML training and API
-data/            # urls.txt, master2.json
+data/            # urls.txt, master2.json (legacy)
+database/        # PostgreSQL schema and migration tools
 src/             # Modular components
 dashboard/       # Frontend
 tests/           # Testing framework
@@ -40,11 +41,12 @@ Test report validates:
 - **collector.py** (~600 lines) - Main orchestrator
   - `RobustTikTokProcessor`: Unified processor for all worker modes
   - `process_tiktok_url`: Core URL processing function with consistent flattened output
-- **src/** - Clean separation of concerns (11 modules):
+- **src/** - Clean separation of concerns (12 modules):
   - `video_extractor.py` - yt-dlp downloads & metadata extraction
   - `comment_extractor.py` - TikTok API with MS_TOKEN (currently non-functional)
   - `transcript_extractor.py` - Whisper AI transcription with GPU/CPU support
-  - `data_manager.py` - JSON streaming, file locking & duplicate detection
+  - `database_manager.py` - PostgreSQL operations with connection pooling & caching
+  - `data_manager.py` - JSON streaming, file locking & duplicate detection (legacy)
   - `url_processor.py` - URL validation, normalization & ID extraction
   - `resource_manager.py` - Memory monitoring & process cleanup
   - `device_manager.py` - CUDA/MPS/CPU detection & configuration
@@ -59,16 +61,17 @@ URLs → Filter Duplicates → Process → {
     Video Download + Metadata
     → Whisper Transcription
     → Comment Extraction
-} → Flatten Data → Save to master2.json → Cleanup
+} → Flatten Data → Save to PostgreSQL/master2.json → Cleanup
 ```
 
 ### Key Features
+- **PostgreSQL Database**: Primary storage with ACID transactions, indexed queries, concurrent writes
 - **Robust Data Handling**: File locking, streaming JSON, duplicate detection, atomic writes
 - **Unified Processing**: Always uses worker processes (1 to N) with consistent output
 - **Scalable Processing**: Seamless scaling from 1 to multiple workers
 - **Resource Management**: Memory monitoring, automatic cleanup, signal handling
 - **Cross-platform**: Windows/macOS/Linux with platform-specific optimizations
-- **Error Recovery**: Graceful degradation, retry logic, JSON repair
+- **Error Recovery**: Graceful degradation, retry logic, connection pooling
 - **Rich Terminal UI**: Real-time progress tracking with responsive grid layout
 - **Stage-based Progress**: 6-stage weighted progress reporting per URL
 - **GPU Acceleration**: CUDA & MPS support with automatic fallback to CPU
@@ -77,7 +80,7 @@ URLs → Filter Duplicates → Process → {
 1. **Video metadata** (views, likes, shares, duration, timestamps, author info)
 2. **Transcripts** (Whisper AI with GPU acceleration)
 3. **Comments** (with nested replies - currently unavailable)
-4. **Flattened JSON** output in master2.json with validation
+4. **PostgreSQL storage** with normalized schema, or JSON output for legacy compatibility
 
 ## Configuration
 
@@ -95,8 +98,9 @@ URLs → Filter Duplicates → Process → {
 [tiktok]      # ms_token
 [download]    # quality, whisper settings
 [processing]  # batch_size, delay, workers
-[output]      # json_output file
+[output]      # json_output file (legacy)
 [display]     # mode, raw_log, refresh_rate, console_lines
+[database]    # PostgreSQL connection settings (enabled=true by default)
 ```
 
 ## Enhanced Display System
@@ -125,7 +129,7 @@ Each URL progresses through weighted stages:
 3. **Metadata** (35-45%): Metadata extraction
 4. **Transcribing** (45-85%): Whisper transcription (if enabled)
 5. **Comments** (85-95%): Comment extraction (if MS_TOKEN available)
-6. **Saving** (95-100%): Save to master2.json
+6. **Saving** (95-100%): Save to PostgreSQL database
 
 ### Display Modes
 - **Rich Mode**: Full visual display with panels and progress bars
@@ -141,11 +145,45 @@ python test_display_visual.py --workers 4 --urls 20
 python quick_display_test.py -w 4 -u 5
 ```
 
+## Database System (PostgreSQL)
+
+### Overview
+The system now uses PostgreSQL as primary storage (enabled by default in config.toml):
+- **3,916 videos** migrated from master2.json
+- **Normalized schema** with 6 tables (videos, comments, transcriptions, hashtags, etc.)
+- **Indexed queries** for O(1) duplicate detection vs O(n) JSON scanning
+- **Concurrent writes** from multiple workers without file locking
+- **ACID transactions** ensure data integrity
+
+### Database Operations
+```bash
+# Check database statistics
+psql -U $USER -d tiktok_scraper -c "SELECT * FROM database_statistics;"
+
+# Export to JSON if needed
+python -c "from src.database_manager import DatabaseManager; 
+db = DatabaseManager(user='ethan', database='tiktok_scraper'); 
+db.export_to_json('export.json')"
+
+# Migration from JSON
+python database/migrate_json_to_postgres.py data/master2.json
+```
+
+### Configuration
+```toml
+[database]
+enabled = true    # Use PostgreSQL (recommended)
+host = "localhost"
+database = "tiktok_scraper"
+user = "ethan"
+```
+
 ## Development Guidelines
 - Use `codebase-structure-analyzer` agent frequently for large file analysis
 - Maintain clean modular separation
 - Follow existing patterns and conventions
 - Run tests after every change
 - See `/Users/ethan/tiktok_scraper-1/tiktok_data_collection_uml_analysis.md` for class structure
+- See `/Users/ethan/tiktok_scraper-1/database/README.md` for database setup and operations
 
 **NOTE** comment extraction has been patched indefinitely and there is nothing we can do as of 8/20/2025 to fix it 

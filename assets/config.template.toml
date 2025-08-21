@@ -39,7 +39,8 @@ delay = 2
 workers = 1
 
 [output]
-# Main JSON output file
+# Main JSON output file (used only when database.enabled=false)
+# When using PostgreSQL, this setting is ignored
 json_output = "data/master2.json"
 
 [display]
@@ -92,3 +93,19 @@ show_progress = true
 metadata = true        # Video download and metadata extraction
 transcription = true   # Whisper AI transcription
 comments = false       # TikTok API comments (currently non-functional)
+
+[database]
+# PostgreSQL configuration (recommended over JSON for better performance)
+# Set enabled=true to use PostgreSQL instead of JSON file storage
+enabled = false        # Set to true to use PostgreSQL
+host = "localhost"
+port = 5432
+database = "tiktok_scraper"
+user = "postgres"      # Update with your PostgreSQL username
+password = ""          # Leave empty and use DB_PASSWORD environment variable for security
+min_connections = 2    # Minimum database connections in pool
+max_connections = 10   # Maximum database connections in pool
+
+# Migration settings
+auto_migrate = false   # Automatically migrate existing JSON data to database on startup
+migration_batch_size = 100  # Number of records to migrate at once

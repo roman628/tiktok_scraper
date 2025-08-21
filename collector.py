@@ -29,6 +29,7 @@ from src.models import VideoData, ProcessingState, Comment
 from src.url_processor import URLProcessor  
 from utils.resource_manager import ResourceManager
 from utils.data_manager import DataManager
+from src.database_manager import DatabaseOrJsonManager
 from src.video_extractor import VideoExtractor, load_whisper_model
 from src.comment_extractor import CommentExtractor
 from src.transcript_extractor import TranscriptExtractor
@@ -43,14 +44,18 @@ download_single_video = VideoExtractor().download_single_video
 class RobustTikTokProcessor:
     """Main processor for TikTok data collection."""
     
-    def __init__(self, args):
+    def __init__(self, args, config=None):
         self.args = args
         self.master_file = args.json_output
         self.source_file = None
         self.shutdown_requested = False
+        self.config = config or {}
         
-        # Initialize components
-        self.data_manager = DataManager(self.master_file)
+        # Initialize components - use database if configured
+        if self.config.get('database', {}).get('enabled', False):
+            self.data_manager = DatabaseOrJsonManager(self.config)
+        else:
+            self.data_manager = DataManager(self.master_file)
         self.video_extractor = VideoExtractor(
             output_dir=args.output,
             quality=args.quality,
@@ -118,7 +123,11 @@ class RobustTikTokProcessor:
     def load_existing_progress(self):
         """Load existing URLs from master file for duplicate detection."""
         # This is now handled by DataManager
-        existing_count = len(self.data_manager.existing_urls)
+        # Handle both DatabaseOrJsonManager and DataManager
+        if hasattr(self.data_manager, 'existing_urls'):
+            existing_count = len(self.data_manager.existing_urls)
+        else:
+            existing_count = len(self.data_manager.get_existing_urls())
         if existing_count > 0:
             print(f"Loaded {existing_count} existing URLs from {self.master_file}")
     
@@ -444,7 +453,10 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
         # Save to master file
         progress.start_saving()
         data_manager.append_to_master(video_data)
-        data_manager.existing_urls.add(url)
+        # Update cache for duplicate detection
+        if hasattr(data_manager, 'existing_urls'):
+            data_manager.existing_urls.add(url)
+        # DatabaseOrJsonManager handles this internally
         progress.complete_saving()
         
         # Cleanup if needed
@@ -487,8 +499,11 @@ async def worker_process(worker_id: int, url_queue, result_queue, display_queue,
     if ms_token:
         comment_extractor = CommentExtractor(ms_token=ms_token, max_comments=args.max_comments)
     
-    # Initialize data manager for this worker
-    data_manager = DataManager(args.json_output)
+    # Initialize data manager for this worker - use database if configured
+    if config and config.get('database', {}).get('enabled', False):
+        data_manager = DatabaseOrJsonManager(config)
+    else:
+        data_manager = DataManager(args.json_output)
 
     # Setup Whisper
     whisper_model = None
@@ -822,9 +837,8 @@ async def main():
                 print("Error: Provide --url or --from-file (or set default_urls_file in config.toml)")
                 return
     
-    # Initialize processor
-    processor = RobustTikTokProcessor(args)
-    processor.config = config  # Store config in processor
+    # Initialize processor with config
+    processor = RobustTikTokProcessor(args, config)
     
     # Load existing progress
     if not args.force_redownload:
