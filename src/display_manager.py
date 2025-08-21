@@ -38,6 +38,9 @@ class WorkerState:
     last_update: float = field(default_factory=time.time)
     error_message: Optional[str] = None
     stage_details: Optional[str] = None
+    flash_complete: bool = False
+    flash_count: int = 0
+    flash_time: float = 0
 
 
 class DisplayManager:
@@ -208,27 +211,22 @@ class DisplayManager:
         """
         lines = []
         
-        # Line 1: URL (use full width available) + counter
+        # Line 1: URL (without counter since it's in header now)
         if worker.current_url:
-            # Use more of the available panel width
-            counter = f" ({worker.completed_urls}/{worker.total_urls})"
-            counter_width = len(counter)
-            # Leave some padding but use most of the space
-            max_url_length = panel_width - counter_width - 4
+            # Use full available panel width
+            max_url_length = panel_width - 4  # Just leave some padding
             
             url_display = worker.current_url
             if len(url_display) > max_url_length:
                 # Only truncate if absolutely necessary
                 url_display = url_display[:max_url_length]
             
-            # Create URL line with counter
+            # Create URL line
             url_line = Text()
             url_line.append(url_display, style="bright_blue")
-            url_line.append(counter, style="dim")
             lines.append(url_line)
         else:
-            lines.append(Text(f"Waiting for URL ({worker.completed_urls}/{worker.total_urls})", 
-                            style="dim"))
+            lines.append(Text("Waiting for URL", style="dim"))
         
         # Line 2: Progress bar + percentage + stage
         progress_bar = self.create_progress_bar(worker.current_url_progress)
@@ -291,20 +289,28 @@ class DisplayManager:
                     else:
                         lines.append(Text("  " + str(log_entry), style="dim"))
         
-        # Determine border style based on status
-        border_style = "dim"
-        if worker.status == 'processing':
+        # Determine border style based on status (default to grey)
+        # Check if we should flash green (URL just completed)
+        if hasattr(worker, 'flash_complete') and worker.flash_complete:
+            # Flash green for recently completed URLs
+            border_style = "green"
+        elif worker.status == 'processing':
             border_style = "bright_blue"
         elif worker.status == 'completed':
             border_style = "green"
         elif worker.status == 'error':
             border_style = "red"
+        else:
+            # Default to a darker grey (not purple)
+            border_style = "bright_black"  # This gives a true grey color
         
-        # Create panel
+        # Create panel with counter in title
+        title = f"Worker {worker.worker_id + 1} ({worker.completed_urls}/{worker.total_urls})"
         panel_content = "\n".join(str(line) for line in lines)
         return Panel(
             panel_content,
-            title=f"Worker {worker.worker_id + 1}",
+            title=title,
+            title_align="left",  # Align title to the left
             border_style=border_style,
             width=panel_width,
             height=self.layout_config['panel_height'] if self.layout_config else None
@@ -404,6 +410,10 @@ class DisplayManager:
                 'level': 'success',
                 'message': f"Completed URL {worker.completed_urls}/{worker.total_urls}"
             })
+            # Start flash animation
+            worker.flash_complete = True
+            worker.flash_count = 6  # Flash 3 times (on/off = 6 transitions)
+            worker.flash_time = time.time()
             # Reset for next URL
             worker.current_url = None
             worker.current_url_progress = 0
@@ -445,6 +455,17 @@ class DisplayManager:
                     self.layout_config = None
                 
                 self.resize_pending = False
+            
+            # Handle flash animations
+            current_time = time.time()
+            for worker in self.workers.values():
+                if worker.flash_complete and worker.flash_count > 0:
+                    # Flash every 0.15 seconds
+                    if current_time - worker.flash_time > 0.15:
+                        worker.flash_count -= 1
+                        worker.flash_time = current_time
+                        # Toggle flash state
+                        worker.flash_complete = not worker.flash_complete if worker.flash_count > 0 else False
             
             # Update display with new content
             self.live.update(self.render_display())

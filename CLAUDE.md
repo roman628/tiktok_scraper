@@ -40,15 +40,18 @@ Test report validates:
 - **collector.py** (~524 lines) - Main orchestrator
   - `RobustTikTokProcessor`: Single URL processing 
   - `MultiprocessCoordinator`: Parallel processing
-- **src/** - Clean separation of concerns:
-  - `video_extractor.py` - yt-dlp downloads & metadata
-  - `comment_extractor.py` - TikTok API with MS_TOKEN
-  - `transcript_extractor.py` - Whisper AI transcription
-  - `data_manager.py` - JSON streaming & duplicate detection
-  - `url_processor.py` - URL validation & ID extraction
-  - `resource_manager.py` - Memory/process cleanup
-  - `device_manager.py` - GPU/CPU detection
-  - `models.py` - Data structures
+- **src/** - Clean separation of concerns (11 modules):
+  - `video_extractor.py` - yt-dlp downloads & metadata extraction
+  - `comment_extractor.py` - TikTok API with MS_TOKEN (currently non-functional)
+  - `transcript_extractor.py` - Whisper AI transcription with GPU/CPU support
+  - `data_manager.py` - JSON streaming, file locking & duplicate detection
+  - `url_processor.py` - URL validation, normalization & ID extraction
+  - `resource_manager.py` - Memory monitoring & process cleanup
+  - `device_manager.py` - CUDA/MPS/CPU detection & configuration
+  - `models.py` - Type-safe data structures (Comment, VideoData, ProcessingState)
+  - `display_manager.py` - Rich terminal UI with responsive grid layout
+  - `worker_progress.py` - Stage-based progress reporting (6 weighted stages)
+  - `shutdown_manager.py` - Centralized graceful shutdown handling
 
 ### Processing Pipeline
 ```
@@ -60,17 +63,20 @@ URLs → Filter Duplicates → Process → {
 ```
 
 ### Key Features
-- **Robust Data Handling**: File locking, streaming, duplicate detection
-- **Scalable Processing**: Single/multi-process modes
-- **Resource Management**: Automatic cleanup between operations
-- **Cross-platform**: Windows/macOS/Linux support
-- **Error Recovery**: Graceful degradation, retry logic
+- **Robust Data Handling**: File locking, streaming JSON, duplicate detection, atomic writes
+- **Scalable Processing**: Single/multi-process modes with worker coordination
+- **Resource Management**: Memory monitoring, automatic cleanup, signal handling
+- **Cross-platform**: Windows/macOS/Linux with platform-specific optimizations
+- **Error Recovery**: Graceful degradation, retry logic, JSON repair
+- **Rich Terminal UI**: Real-time progress tracking with responsive grid layout
+- **Stage-based Progress**: 6-stage weighted progress reporting per URL
+- **GPU Acceleration**: CUDA & MPS support with automatic fallback to CPU
 
 ### What System Extracts
-1. **Video metadata** (likes, comments, shares, duration, timestamps)
-2. **Transcripts** (Whisper AI)
-3. **Comments** (with nested replies)
-4. **Flattened JSON** output in master2.json
+1. **Video metadata** (views, likes, shares, duration, timestamps, author info)
+2. **Transcripts** (Whisper AI with GPU acceleration)
+3. **Comments** (with nested replies - currently unavailable)
+4. **Flattened JSON** output in master2.json with validation
 
 ## Configuration
 
@@ -80,6 +86,8 @@ URLs → Filter Duplicates → Process → {
 - `--ms-token` / `--max-comments` - Comment extraction
 - `--workers` / `--batch-size` - Processing control
 - `--json-output` - Output file
+- `--display-mode` - Display mode (rich/simple/auto)
+- `--raw-log` - Save raw output to timestamped log file
 
 ### config.toml Sections
 ```toml
@@ -87,6 +95,49 @@ URLs → Filter Duplicates → Process → {
 [download]    # quality, whisper settings
 [processing]  # batch_size, delay, workers
 [output]      # json_output file
+[display]     # mode, raw_log, refresh_rate, console_lines
+```
+
+## Enhanced Display System
+
+### Rich Terminal UI
+The system now includes a sophisticated terminal display with:
+- **Responsive Grid Layout**: Automatically adapts to terminal width
+  - Horizontal layout when space permits
+  - Wraps to multiple rows when needed
+- **Per-Worker Progress**: Each worker shows:
+  - Current URL being processed
+  - Progress bar (0-100%) for current URL
+  - Stage indicator (downloading, transcribing, etc.)
+  - Console output with success/error indicators
+  - Counter showing (completed/total) in header
+- **Visual Feedback**:
+  - Grey borders for idle workers
+  - Blue borders for active processing
+  - Green flash animation (3x) when URL completes
+  - Red borders for errors
+
+### Progress Stages
+Each URL progresses through weighted stages:
+1. **Validating** (0-5%): URL validation
+2. **Downloading** (5-35%): Video/audio download
+3. **Metadata** (35-45%): Metadata extraction
+4. **Transcribing** (45-85%): Whisper transcription (if enabled)
+5. **Comments** (85-95%): Comment extraction (if MS_TOKEN available)
+6. **Saving** (95-100%): Save to master2.json
+
+### Display Modes
+- **Rich Mode**: Full visual display with panels and progress bars
+- **Simple Mode**: Basic line-by-line output for non-TTY environments
+- **Auto Mode**: Automatically detects TTY and chooses appropriate mode
+
+### Testing Display
+```bash
+# Test with simulated workers
+python test_display_visual.py --workers 4 --urls 20
+
+# Quick test
+python quick_display_test.py -w 4 -u 5
 ```
 
 ## Development Guidelines

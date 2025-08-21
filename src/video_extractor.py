@@ -39,7 +39,7 @@ class VideoExtractor:
     def download_single_video(self, url: str, audio_only: bool = False, 
                             use_whisper: bool = False, whisper_model: Any = None,
                             whisper_device: str = "CPU", 
-                            shutdown_event=None) -> Dict[str, Any]:
+                            shutdown_event=None, progress_callback=None) -> Dict[str, Any]:
         """Download a single TikTok video with metadata.
         
         Args:
@@ -67,6 +67,10 @@ class VideoExtractor:
                 return {'success': False, 'error': 'Shutdown during metadata', 'url': url}
                 
             # Extract metadata first
+            if progress_callback:
+                progress_callback.send_progress('downloading', 10)
+                progress_callback.send_log("Extracting video metadata...", 'progress')
+            
             metadata = self._extract_metadata(url)
             if not metadata:
                 return {'success': False, 'error': 'Failed to extract metadata', 'url': url}
@@ -74,6 +78,10 @@ class VideoExtractor:
             # Check if video is deleted/private
             if isinstance(metadata, dict) and metadata.get('deleted'):
                 return {'success': False, 'error': metadata.get('error'), 'deleted': True, 'url': url}
+            
+            if progress_callback:
+                progress_callback.send_progress('downloading', 30)
+                progress_callback.send_log("Metadata extracted successfully", 'success')
             
             # Check shutdown before download
             if shutdown_event and shutdown_event.is_set():
@@ -85,9 +93,17 @@ class VideoExtractor:
             video_folder.mkdir(parents=True, exist_ok=True)
             
             # Download video/audio with shutdown event
+            if progress_callback:
+                progress_callback.send_progress('downloading', 50)
+                progress_callback.send_log("Downloading video content...", 'progress')
+            
             download_path = self._download_content(url, video_folder, folder_name, audio_only, use_whisper)
             if not download_path:
                 return {'success': False, 'error': 'Download failed', 'url': url}
+            
+            if progress_callback:
+                progress_callback.send_progress('downloading', 90)
+                progress_callback.send_log("Download completed", 'success')
             
             # Check shutdown before transcription
             if shutdown_event and shutdown_event.is_set():
@@ -95,10 +111,18 @@ class VideoExtractor:
                 
             # Transcribe if requested
             if use_whisper:
+                if progress_callback:
+                    progress_callback.send_progress('transcribing', 10)
+                    progress_callback.send_log("Starting transcription...", 'progress')
+                
                 transcript = self._transcribe_video(download_path, whisper_model, whisper_device)
                 if transcript:
                     metadata['whisper_transcription'] = transcript
                     metadata['transcription_timestamp'] = datetime.now().isoformat()
+                    
+                    if progress_callback:
+                        progress_callback.send_progress('transcribing', 90)
+                        progress_callback.send_log("Transcription completed", 'success')
             
             # Save metadata
             metadata_path = video_folder / 'metadata.json'

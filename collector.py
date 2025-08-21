@@ -141,58 +141,130 @@ class RobustTikTokProcessor:
         """Process list of URLs."""
         self.state.total_urls = len(urls)
         
-        for i, url in enumerate(urls):
-            if self.shutdown_requested:
-                print("Shutdown requested, stopping processing")
-                break
-            
-            print(f"\nProcessing {i+1}/{len(urls)}: {url}")
-            
-            # Process single URL
-            result = await self.process_single_url(url, download_kwargs)
-            
-            if result:
-                self.state.processed_urls += 1
-            else:
-                self.state.failed_urls.append(url)
-            
-            # Save progress periodically
-            if (i + 1) % self.args.batch_size == 0:
-                self.save_progress()
-            
-            # Delay between requests
-            if i < len(urls) - 1:
-                time.sleep(self.args.delay)
-            
-            # Memory cleanup
-            if (i + 1) % 3 == 0:
-                self.resource_manager.check_memory_and_cleanup()
+        # Create display manager for single worker
+        display_mode = getattr(self.args, 'display_mode', 'auto')
+        raw_log_path = None
+        if getattr(self.args, 'raw_log', False):
+            raw_log_path = f"processing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         
-        # Final save
-        self.save_progress()
-        print(f"\nCompleted: {self.state.processed_urls}/{self.state.total_urls} URLs processed")
+        display_manager = create_display(
+            1,  # Single worker
+            len(urls),
+            mode=display_mode,
+            raw_log_path=raw_log_path
+        )
+        
+        # Create display queue
+        display_queue = queue.Queue()
+        
+        # Initialize progress tracker
+        progress = WorkerProgress(0, display_queue, len(urls))
+        
+        # Start display
+        display_manager.start()
+        
+        # Create a separate thread to update display continuously
+        import threading
+        display_running = threading.Event()
+        display_running.set()
+        
+        def update_display_thread():
+            while display_running.is_set():
+                # Process all queued updates
+                while not display_queue.empty():
+                    try:
+                        update = display_queue.get_nowait()
+                        display_manager.process_update(update)
+                    except:
+                        pass
+                # Update the display
+                display_manager.update()
+                time.sleep(0.1)  # Update 10 times per second
+        
+        display_thread = threading.Thread(target=update_display_thread, daemon=True)
+        display_thread.start()
+        
+        try:
+            for i, url in enumerate(urls):
+                if self.shutdown_requested:
+                    progress.send_log("Shutdown requested, stopping processing", 'info')
+                    break
+                
+                # Start processing URL
+                progress.start_url(url)
+                
+                # Process single URL with progress tracking
+                result = await self.process_single_url(url, download_kwargs, progress)
+                
+                if result:
+                    self.state.processed_urls += 1
+                    progress.complete_url()
+                else:
+                    self.state.failed_urls.append(url)
+                    progress.report_error('processing', 'Failed to process URL')
+                
+                # Save progress periodically
+                if (i + 1) % self.args.batch_size == 0:
+                    self.save_progress()
+                
+                # Delay between requests
+                if i < len(urls) - 1:
+                    time.sleep(self.args.delay)
+                
+                # Memory cleanup
+                if (i + 1) % 3 == 0:
+                    self.resource_manager.check_memory_and_cleanup()
+        finally:
+            # Stop display thread
+            display_running.clear()
+            display_thread.join(timeout=1)
+            
+            # Stop display
+            display_manager.stop()
+            
+            # Final save
+            self.save_progress()
+            print(f"\nCompleted: {self.state.processed_urls}/{self.state.total_urls} URLs processed")
     
-    async def process_single_url(self, url: str, download_kwargs: Dict[str, Any]) -> bool:
+    async def process_single_url(self, url: str, download_kwargs: Dict[str, Any], 
+                                 progress: Optional[WorkerProgress] = None) -> bool:
         """Process a single TikTok URL."""
         # Check if URL was already processed
         if url in self.data_manager.existing_urls:
-            print(f"⏭️  Skipping duplicate: {url}")
+            if progress:
+                progress.send_log("Skipping duplicate", 'info')
+            else:
+                print(f"⏭️  Skipping duplicate: {url}")
             return True  # Return True since it's already processed
         
         try:
+            # Start download stage
+            if progress:
+                progress.start_download()
+            else:
+                print("Downloading video...")
+            
             # Download video and extract metadata
-            print("Downloading video...")
             video_result = self.video_extractor.download_single_video(
                 url,
                 audio_only=download_kwargs.get('audio_only', False),
                 use_whisper=download_kwargs.get('use_whisper', False),
                 whisper_model=download_kwargs.get('whisper_model'),
-                whisper_device=download_kwargs.get('whisper_device', 'CPU')
+                whisper_device=download_kwargs.get('whisper_device', 'CPU'),
+                progress_callback=progress
             )
+            
+            # Update progress after download
+            if progress:
+                progress.send_progress('downloading', 100)
+                progress.send_log("Download complete", 'success')
             
             if not video_result['success']:
                 error_msg = video_result.get('error', '')
-                print(f"Download failed: {error_msg}")
+                if progress:
+                    progress.report_error('download', error_msg)
+                else:
+                    print(f"Download failed: {error_msg}")
                 
                 # Check if this is a deleted/private video
                 if video_result.get('deleted'):
@@ -204,19 +276,52 @@ class RobustTikTokProcessor:
             
             metadata = video_result['metadata']
             
+            # Report metadata extraction
+            if progress:
+                progress.start_metadata_extraction()
+                progress.send_log("Processing metadata...", 'progress')
+                if 'likes' in metadata:
+                    progress.complete_metadata(
+                        metadata.get('likes', 0),
+                        metadata.get('comment_count', 0)
+                    )
+                else:
+                    progress.send_progress('metadata', 100)
+                    progress.send_log("Metadata extracted", 'success')
+            
             # Extract transcript from metadata if present
             transcript = metadata.get('whisper_transcription', '')
+            if progress:
+                if transcript:
+                    # Transcription was done
+                    progress.send_progress('transcribing', 100)
+                    progress.complete_transcription(metadata.get('duration', 0))
+                elif download_kwargs.get('use_whisper', False):
+                    # Whisper was enabled but no transcript
+                    progress.skip_transcription("No audio found")
+                else:
+                    # Whisper not enabled
+                    progress.skip_transcription("Whisper not enabled")
             
             # Extract comments if MS_TOKEN is available
             comments = []
             if self.comment_extractor and self.ms_token:
-                print("Extracting comments...")
+                if progress:
+                    progress.start_comments()
+                else:
+                    print("Extracting comments...")
                 try:
                     comment_objects = await self.comment_extractor.extract_comments(url)
                     comments = [comment.to_dict() for comment in comment_objects]
-                    print(f"Extracted {len(comments)} comments")
+                    if progress:
+                        progress.complete_comments(len(comments))
+                    else:
+                        print(f"Extracted {len(comments)} comments")
                 except Exception as e:
-                    print(f"Comment extraction failed: {e}")
+                    if progress:
+                        progress.report_error('comments', str(e))
+                    else:
+                        print(f"Comment extraction failed: {e}")
             
             # Create flattened data structure (all fields at top level)
             video_data = {
@@ -251,10 +356,15 @@ class RobustTikTokProcessor:
             }
             
             # Save to master file
+            if progress:
+                progress.start_saving()
             self.data_manager.append_to_master(video_data)
             
             # Add URL to existing set to prevent reprocessing
             self.data_manager.existing_urls.add(url)
+            
+            if progress:
+                progress.complete_saving()
             
             # Cleanup download folder if needed
             if self.args.mp3 and video_result.get('folder'):
@@ -263,7 +373,10 @@ class RobustTikTokProcessor:
             return True
             
         except Exception as e:
-            print(f"Error processing URL: {e}")
+            if progress:
+                progress.report_error('processing', str(e))
+            else:
+                print(f"Error processing URL: {e}")
             return False
     
     async def cleanup_api_session(self):
@@ -557,7 +670,7 @@ def worker_process(worker_id: int, url_queue, result_queue, display_queue,
                 whisper_model=whisper_model,
                 whisper_device=whisper_config.get('device', 'cpu').upper() if whisper_config else 'CPU',
                 shutdown_event=shutdown_event,  # Pass shutdown event
-                progress_callback=lambda stage, msg: progress.send_log(msg, 'progress')
+                progress_callback=progress  # Pass the progress tracker directly
             )
         
             # Check shutdown after download
