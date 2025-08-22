@@ -93,10 +93,21 @@ class ProcessingStatusView(APIView):
         
         # Get last collector run
         last_collector_run = None
+        last_run_urls_processed = 0
         try:
-            last_run = CollectorRun.objects.filter(status='completed').order_by('-ended_at').first()
-            if last_run:
+            # Get last two runs to calculate the difference
+            last_runs = list(CollectorRun.objects.filter(status__in=['completed', 'stopped']).order_by('-ended_at')[:2])
+            if last_runs:
+                last_run = last_runs[0]
                 last_collector_run = last_run.ended_at.isoformat() if last_run.ended_at else None
+                
+                # Calculate URLs processed in the last run (difference from previous)
+                if len(last_runs) > 1:
+                    previous_run = last_runs[1]
+                    last_run_urls_processed = last_run.urls_processed - previous_run.urls_processed
+                else:
+                    # First run, all URLs are new
+                    last_run_urls_processed = last_run.urls_processed
         except:
             pass
         
@@ -132,6 +143,7 @@ class ProcessingStatusView(APIView):
             'total': pending + processing + completed + failed,
             'total_videos': total_videos,
             'last_collector_run': last_collector_run,
+            'last_run_urls_processed': last_run_urls_processed,
             'last_ml_training': last_ml_training,
             'ml_training_active': ml_training_active,
             'ml_training_started_at': ml_training_started_at
@@ -311,7 +323,7 @@ class CollectorCompleteView(View):
                 CollectorRun.objects.create(
                     started_at=datetime.fromisoformat(started_at) if started_at else timezone.now(),
                     ended_at=datetime.fromisoformat(stopped_at) if stopped_at else timezone.now(),
-                    urls_processed=urls_processed,
+                    urls_processed=urls_processed,  # Store cumulative total for consistency
                     status='completed' if reason == 'completed' else 'stopped'
                 )
                 logger.info("✅ CollectorRun record created for dashboard")
@@ -415,22 +427,50 @@ class MLTrainingEndView(View):
     
     def post(self, request):
         try:
+            data = json.loads(request.body) if request.body else {}
+            metrics = data.get('metrics', {})
+            test_predictions = data.get('test_predictions', [])
+            
             # Get the most recent running training
             training_run = MLTrainingRun.objects.filter(status='running').order_by('-trained_at').first()
             
             if training_run:
-                # Update status to completed
+                # Update with metrics
                 training_run.status = 'completed'
+                training_run.r2_score = metrics.get('r2_score')
+                training_run.mae = metrics.get('mae')
+                training_run.rmse = metrics.get('rmse')
+                training_run.prediction_range = metrics.get('prediction_range')
+                training_run.prediction_std = metrics.get('prediction_std')
+                training_run.cv_mean = metrics.get('cv_mean')
+                training_run.cv_std = metrics.get('cv_std')
+                training_run.test_predictions = test_predictions
+                
+                # Calculate effectiveness score
+                effectiveness = training_run.calculate_effectiveness()
+                training_run.effectiveness_score = effectiveness
+                
                 training_run.save()
-                logger.info(f"✅ ML training completed signal received for training {training_run.id}")
+                logger.info(f"✅ ML training completed with metrics for training {training_run.id}")
             else:
                 # Create a completed entry if no running one exists
                 training_run = MLTrainingRun.objects.create(
                     model_name='snoo',
                     status='completed',
-                    trained_at=datetime.now()
+                    trained_at=datetime.now(),
+                    r2_score=metrics.get('r2_score'),
+                    mae=metrics.get('mae'),
+                    rmse=metrics.get('rmse'),
+                    prediction_range=metrics.get('prediction_range'),
+                    prediction_std=metrics.get('prediction_std'),
+                    cv_mean=metrics.get('cv_mean'),
+                    cv_std=metrics.get('cv_std'),
+                    test_predictions=test_predictions
                 )
-                logger.info("✅ ML training completed signal received (no prior start signal)")
+                effectiveness = training_run.calculate_effectiveness()
+                training_run.effectiveness_score = effectiveness
+                training_run.save()
+                logger.info("✅ ML training completed with metrics (no prior start signal)")
             
             return JsonResponse({
                 'status': 'acknowledged',
@@ -439,6 +479,121 @@ class MLTrainingEndView(View):
         except Exception as e:
             logger.error(f"Error processing ML end signal: {e}")
             return JsonResponse({'error': str(e)}, status=500)
+
+
+class MLMetricsView(APIView):
+    """Get current and historical ML metrics"""
+    
+    def get(self, request):
+        try:
+            # Get latest completed training run
+            latest_run = MLTrainingRun.objects.filter(status='completed').order_by('-trained_at').first()
+            
+            if not latest_run:
+                return Response({
+                    'error': 'No completed training runs found'
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # Get previous run for comparison
+            previous_run = MLTrainingRun.objects.filter(
+                status='completed',
+                trained_at__lt=latest_run.trained_at
+            ).order_by('-trained_at').first()
+            
+            # Calculate percentage changes for all metrics
+            change = None
+            r2_change = None
+            mae_change = None
+            rmse_change = None
+            
+            if previous_run:
+                if previous_run.effectiveness_score and latest_run.effectiveness_score:
+                    change = ((latest_run.effectiveness_score - previous_run.effectiveness_score) / 
+                             previous_run.effectiveness_score * 100)
+                
+                if previous_run.r2_score and latest_run.r2_score:
+                    r2_change = ((latest_run.r2_score - previous_run.r2_score) / 
+                                abs(previous_run.r2_score) * 100) if previous_run.r2_score != 0 else None
+                
+                if previous_run.mae and latest_run.mae:
+                    # MAE: lower is better, so negative change is good
+                    mae_change = ((latest_run.mae - previous_run.mae) / 
+                                 previous_run.mae * 100) if previous_run.mae != 0 else None
+                
+                if previous_run.rmse and latest_run.rmse:
+                    # RMSE: lower is better, so negative change is good
+                    rmse_change = ((latest_run.rmse - previous_run.rmse) / 
+                                  previous_run.rmse * 100) if previous_run.rmse != 0 else None
+            
+            # Get historical data for chart (last 10 runs)
+            history = []
+            historical_runs = MLTrainingRun.objects.filter(
+                status='completed',
+                effectiveness_score__isnull=False
+            ).order_by('-trained_at')[:10]
+            
+            for run in reversed(historical_runs):
+                history.append({
+                    'date': run.trained_at.isoformat(),
+                    'effectiveness': run.effectiveness_score,
+                    'r2': run.r2_score,
+                    'mae': run.mae,
+                    'rmse': run.rmse
+                })
+            
+            return Response({
+                'effectiveness': latest_run.effectiveness_score or 0,
+                'r2_score': latest_run.r2_score or 0,
+                'mae': latest_run.mae or 0,
+                'rmse': latest_run.rmse or 0,
+                'change': change,
+                'r2_change': r2_change,
+                'mae_change': mae_change,
+                'rmse_change': rmse_change,
+                'test_predictions': latest_run.test_predictions or [],
+                'history': history,
+                'trained_at': latest_run.trained_at.isoformat()
+            })
+            
+        except Exception as e:
+            logger.error(f"Error getting ML metrics: {e}")
+            return Response({
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class MLHistoryView(APIView):
+    """Get ML training history for charting"""
+    
+    def get(self, request):
+        try:
+            # Get all completed runs with effectiveness scores
+            runs = MLTrainingRun.objects.filter(
+                status='completed',
+                effectiveness_score__isnull=False
+            ).order_by('trained_at')
+            
+            history = []
+            for run in runs:
+                history.append({
+                    'date': run.trained_at.isoformat(),
+                    'effectiveness': run.effectiveness_score,
+                    'r2': run.r2_score,
+                    'mae': run.mae,
+                    'rmse': run.rmse,
+                    'id': run.id
+                })
+            
+            return Response({
+                'history': history,
+                'count': len(history)
+            })
+            
+        except Exception as e:
+            logger.error(f"Error getting ML history: {e}")
+            return Response({
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 def dashboard_view(request):
@@ -455,11 +610,21 @@ def dashboard_view(request):
     
     # Get last collector run from database or Django model
     last_collector_date = None
+    last_run_urls_processed = 0
     try:
-        # Try Django model first
-        last_collector_run = CollectorRun.objects.filter(status__in=['completed', 'failed', 'stopped']).order_by('-ended_at').first()
-        if last_collector_run:
+        # Get last two runs to calculate the difference
+        last_runs = list(CollectorRun.objects.filter(status__in=['completed', 'failed', 'stopped']).order_by('-ended_at')[:2])
+        if last_runs:
+            last_collector_run = last_runs[0]
             last_collector_date = last_collector_run.ended_at
+            
+            # Calculate URLs processed in the last run (difference from previous)
+            if len(last_runs) > 1:
+                previous_run = last_runs[1]
+                last_run_urls_processed = last_collector_run.urls_processed - previous_run.urls_processed
+            else:
+                # First run, all URLs are new
+                last_run_urls_processed = last_collector_run.urls_processed
         else:
             # Fallback to direct database query
             from django.db import connection
@@ -508,6 +673,7 @@ def dashboard_view(request):
     context = {
         'collector_running': collector_running,
         'last_collector_date': last_collector_date,
+        'last_run_urls_processed': last_run_urls_processed,
         'last_ml_date': last_ml_date,
         'video_count': video_count,
         'url_count': url_count,

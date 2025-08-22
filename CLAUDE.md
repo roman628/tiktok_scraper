@@ -272,6 +272,45 @@ database = "tiktok_scraper"
 user = "postgres"
 ```
 
+## Dashboard System
+
+### Live Polling Mechanism
+The dashboard (`dashboard/`) uses automatic polling to display real-time status updates:
+
+#### Polling Architecture
+- **Endpoint**: `/api/status/` - Returns combined status from multiple sources
+- **Interval**: Every 3 seconds (configured in `dashboard.html`)
+- **JavaScript Function**: `updateDashboard()` fetches and updates UI elements
+- **Animation**: Pulse effect on changed values for visual feedback
+
+#### Status Data Sources
+1. **Collector Status**: 
+   - Database table `collector_status`
+   - Process checking via `pgrep`
+   - Django model `CollectorRun`
+
+2. **ML Training Status**:
+   - Django model `MLTrainingRun` with status field
+   - Signals from `train_ml.py` via `/api/ml/start/` and `/api/ml/end/`
+   - Training runs independently - dashboard updates only if server is running
+
+3. **URL Processing**:
+   - `QueuedURL` model tracks pending/processing/completed/failed
+   - Real-time counts update automatically
+
+#### ML Training Integration
+The ML training script (`ml/train_ml.py`) sends HTTP signals to the dashboard:
+- **Start Signal**: POST to `/api/ml/start/` when training begins
+- **End Signal**: POST to `/api/ml/end/` when training completes
+- **Fault Tolerant**: Training continues even if server is down (signals fail silently)
+- **Status Display**: Shows "Training" or "Idle" with green/grey indicator
+
+#### Key Features
+- **Non-blocking**: Polling doesn't interfere with operations
+- **Responsive**: Updates within 3 seconds of state changes
+- **Visual Feedback**: Pulse animations highlight changes
+- **Graceful Degradation**: Works even if some services are unavailable
+
 ## Development Guidelines
 - Use `codebase-structure-analyzer` agent frequently for large file analysis
 - Maintain clean modular separation

@@ -29,4 +29,8 @@ urlpatterns = [
     # ML training status signals
     path('api/ml/start/', views.MLTrainingStartView.as_view(), name='ml-training-start'),
     path('api/ml/end/', views.MLTrainingEndView.as_view(), name='ml-training-end'),
+    
+    # ML metrics endpoints
+    path('api/ml/metrics/', views.MLMetricsView.as_view(), name='ml-metrics'),
+    path('api/ml/history/', views.MLHistoryView.as_view(), name='ml-history'),
 ]

@@ -2268,11 +2268,25 @@ def predict_performance_score(transcript: str) -> float:
         return 0.0
 
 
-def signal_training_status(status: str) -> None:
-    """Send training status to dashboard server. Fails silently if server is down."""
+def signal_training_status(status: str, metrics: Optional[Dict] = None, test_predictions: Optional[List] = None) -> None:
+    """Send training status to dashboard server. Fails silently if server is down.
+    
+    Args:
+        status: 'start' or 'end'
+        metrics: Training metrics dictionary (for 'end' status)
+        test_predictions: List of test predictions with text and scores (for 'end' status)
+    """
     try:
         url = f'http://localhost:8000/api/ml/{status}/'
-        response = requests.post(url, timeout=1)
+        data = {}
+        
+        if status == 'end' and metrics:
+            data['metrics'] = metrics
+            
+        if status == 'end' and test_predictions:
+            data['test_predictions'] = test_predictions
+            
+        response = requests.post(url, json=data, timeout=1)
         if response.status_code == 200:
             logging.info(f"✅ ML training {status} signal sent to dashboard")
     except Exception:
@@ -2367,8 +2381,24 @@ Examples:
         model_dir.mkdir(exist_ok=True)
         predictor.save_model(args.model)
         
-        # Signal training end to dashboard
-        signal_training_status('end')
+        # Generate test predictions for dashboard
+        test_predictions = []
+        test_samples = [
+            {"text": "AITA for telling my roommate they can't use my gaming setup when I'm not home even though they helped pay for the electricity bill?", "type": "AITA"},
+            {"text": "TIL that octopuses have three hearts and blue blood. Two hearts pump blood to the gills, while the third pumps blood to the rest of the body.", "type": "TIL"},
+            {"text": "So yesterday I discovered my cat has been living a double life with my neighbor who's been calling him Mr. Whiskers while I call him Shadow.", "type": "Story"}
+        ]
+        
+        for sample in test_samples:
+            score = predictor.predict_score(sample['text'])
+            test_predictions.append({
+                "text": sample['text'],
+                "type": sample['type'],
+                "score": float(score)
+            })
+        
+        # Signal training end to dashboard with metrics and test predictions
+        signal_training_status('end', metrics=metrics, test_predictions=test_predictions)
         
         print("\n" + "=" * 80)
         print("Training Complete!")

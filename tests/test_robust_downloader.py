@@ -198,7 +198,7 @@ class TikTokDownloaderTestFramework:
             db = DatabaseManager(
                 host='localhost',
                 database='tiktok_scraper', 
-                user='ethan'
+                user='postgres'
             )
             
             # Export all data to JSON

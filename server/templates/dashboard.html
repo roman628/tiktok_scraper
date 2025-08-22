@@ -211,6 +211,175 @@
             transform: translateY(-2px);
             box-shadow: 0 6px 20px rgba(0,0,0,0.15);
         }
+        
+        .ml-results {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+        
+        .ml-results h2 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        
+        .ml-metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        
+        .ml-metric-card {
+            text-align: center;
+            padding: 15px;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            background: #fafafa;
+        }
+        
+        .metric-label {
+            color: #666;
+            font-size: 0.85rem;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+        
+        .metric-value {
+            font-size: 1.8rem;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .metric-change {
+            font-size: 1rem;
+            margin-top: 5px;
+            font-weight: 500;
+        }
+        
+        .ml-tabs {
+            display: flex;
+            gap: 10px;
+            margin: 20px 0;
+            border-bottom: 2px solid #e5e7eb;
+        }
+        
+        .ml-tab {
+            padding: 10px 20px;
+            background: none;
+            border: none;
+            color: #666;
+            font-size: 1rem;
+            cursor: pointer;
+            position: relative;
+            transition: color 0.3s ease;
+        }
+        
+        .ml-tab:hover {
+            color: #4f46e5;
+        }
+        
+        .ml-tab.active {
+            color: #4f46e5;
+            font-weight: 600;
+        }
+        
+        .ml-tab.active::after {
+            content: '';
+            position: absolute;
+            bottom: -2px;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: #4f46e5;
+        }
+        
+        .ml-tab-content {
+            min-height: 300px;
+            padding: 20px 0;
+        }
+        
+        .test-predictions {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        
+        .test-prediction {
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 15px;
+            background: #fafafa;
+        }
+        
+        .prediction-number {
+            font-weight: 600;
+            color: #4f46e5;
+            margin-bottom: 10px;
+        }
+        
+        .prediction-content {
+            background: white;
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 15px;
+            border: 1px solid #e5e7eb;
+        }
+        
+        .prediction-text {
+            color: #333;
+            line-height: 1.5;
+            font-size: 0.95rem;
+        }
+        
+        .prediction-score-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .score-label {
+            color: #666;
+            font-size: 0.9rem;
+            white-space: nowrap;
+        }
+        
+        .prediction-score-bar {
+            flex: 1;
+            height: 30px;
+            background: #e5e7eb;
+            border-radius: 15px;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .score-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4f46e5, #7c3aed);
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            padding-right: 10px;
+            transition: width 0.5s ease;
+        }
+        
+        .score-text {
+            color: white;
+            font-weight: 600;
+            font-size: 0.85rem;
+        }
+        
+        #ml-performance-chart {
+            max-height: 400px;
+        }
+        
+        .no-data {
+            text-align: center;
+            color: #999;
+            padding: 40px;
+            font-style: italic;
+        }
     </style>
 </head>
 <body>
@@ -267,6 +436,11 @@
                 <div class="stat-label">Total URLs Collected</div>
                 <div class="stat-value" id="total-urls">{{ url_count|floatformat:0 }}</div>
             </div>
+            
+            <div class="stat-card">
+                <div class="stat-label">Last Run URLs Processed</div>
+                <div class="stat-value" id="last-run-urls">{{ last_run_urls_processed|floatformat:0 }}</div>
+            </div>
         </div>
         
         <div class="url-stats">
@@ -291,35 +465,52 @@
             </div>
         </div>
         
-        <div class="recent-videos">
-            <h2>🎬 Recent Videos</h2>
-            {% if recent_videos %}
-                <ul class="video-list" id="video-list">
-                    {% for video in recent_videos %}
-                        <li class="video-item">
-                            <div class="video-title">
-                                {{ video.title|default:video.video_id|truncatechars:80 }}
-                            </div>
-                            <div class="video-meta">
-                                By {{ video.uploader|default:"Unknown" }} • 
-                                Downloaded {{ video.downloaded_at|date:"M d, H:i" }}
-                            </div>
-                            <div class="video-stats">
-                                <span class="video-stat">👁 {{ video.view_count|default:0|floatformat:0 }} views</span>
-                                <span class="video-stat">❤️ {{ video.like_count|default:0|floatformat:0 }} likes</span>
-                                <span class="video-stat">💬 {{ video.comment_count|default:0|floatformat:0 }} comments</span>
-                            </div>
-                        </li>
-                    {% endfor %}
-                </ul>
-            {% else %}
-                <p class="no-data">No videos downloaded yet</p>
-            {% endif %}
+        <div class="ml-results">
+            <h2>🧠 ML Test Results</h2>
+            
+            <div class="ml-metrics-grid">
+                <div class="ml-metric-card">
+                    <div class="metric-label">Model Effectiveness</div>
+                    <div class="metric-value" id="ml-effectiveness">--</div>
+                    <div class="metric-change" id="ml-change"></div>
+                </div>
+                <div class="ml-metric-card">
+                    <div class="metric-label">R² Score</div>
+                    <div class="metric-value" id="ml-r2">--</div>
+                    <div class="metric-change" id="ml-r2-change"></div>
+                </div>
+                <div class="ml-metric-card">
+                    <div class="metric-label">MAE</div>
+                    <div class="metric-value" id="ml-mae">--</div>
+                    <div class="metric-change" id="ml-mae-change"></div>
+                </div>
+                <div class="ml-metric-card">
+                    <div class="metric-label">RMSE</div>
+                    <div class="metric-value" id="ml-rmse">--</div>
+                    <div class="metric-change" id="ml-rmse-change"></div>
+                </div>
+            </div>
+            
+            <div class="ml-tabs">
+                <button class="ml-tab active" onclick="showMLTab('predictions')">Sample Predictions</button>
+                <button class="ml-tab" onclick="showMLTab('history')">Performance History</button>
+            </div>
+            
+            <div class="ml-tab-content" id="predictions-tab">
+                <div class="test-predictions" id="test-predictions">
+                    <p class="no-data">No test predictions available yet</p>
+                </div>
+            </div>
+            
+            <div class="ml-tab-content" id="history-tab" style="display: none;">
+                <canvas id="ml-performance-chart"></canvas>
+            </div>
         </div>
         
         <a href="/admin/" class="admin-link">Go to Admin Panel →</a>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
         // Live update functionality
         let updateInterval;
@@ -435,6 +626,16 @@
                     addPulseAnimation(urlsEl.parentElement);
                 }
                 
+                // Update Last Run URLs Processed
+                if (data.last_run_urls_processed !== undefined) {
+                    const lastRunEl = document.getElementById('last-run-urls');
+                    const currentLastRun = parseInt(lastRunEl.textContent) || 0;
+                    if (data.last_run_urls_processed !== currentLastRun) {
+                        lastRunEl.textContent = data.last_run_urls_processed;
+                        addPulseAnimation(lastRunEl.parentElement);
+                    }
+                }
+                
                 // Update URL Processing Status
                 const pendingEl = document.getElementById('pending-count');
                 const processingEl = document.getElementById('processing-count');
@@ -458,66 +659,215 @@
                     addPulseAnimation(failedEl);
                 }
                 
-                // Update Recent Videos
-                await updateRecentVideos();
+                // Update ML Metrics
+                await updateMLMetrics();
                 
             } catch (error) {
                 console.error('Dashboard update error:', error);
             }
         }
 
-        async function updateRecentVideos() {
+        let performanceChart = null;
+        
+        function showMLTab(tab) {
+            // Update tab buttons
+            document.querySelectorAll('.ml-tab').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            // Add active class to the clicked button
+            if (tab === 'predictions') {
+                document.querySelectorAll('.ml-tab')[0].classList.add('active');
+            } else {
+                document.querySelectorAll('.ml-tab')[1].classList.add('active');
+            }
+            
+            // Show/hide content
+            if (tab === 'predictions') {
+                document.getElementById('predictions-tab').style.display = 'block';
+                document.getElementById('history-tab').style.display = 'none';
+            } else {
+                document.getElementById('predictions-tab').style.display = 'none';
+                document.getElementById('history-tab').style.display = 'block';
+                // Update chart when history tab is shown
+                updateMLMetrics();
+            }
+        }
+        
+        async function updateMLMetrics() {
             try {
-                const response = await fetch('/api/videos/?limit=10');
+                const response = await fetch('/api/ml/metrics/');
                 if (!response.ok) return;
                 
                 const data = await response.json();
-                const videoList = document.querySelector('.video-list');
-                if (!videoList || !data.results) return;
                 
-                // Check for new videos
-                const newVideos = [];
-                data.results.forEach(video => {
-                    const title = video.title || video.video_id;
-                    if (!lastVideoIds.has(title)) {
-                        newVideos.push(video);
-                        lastVideoIds.add(title);
-                    }
-                });
+                // Update effectiveness score with color coding
+                const effectivenessEl = document.getElementById('ml-effectiveness');
+                if (data.effectiveness !== undefined && data.effectiveness !== null) {
+                    effectivenessEl.textContent = `${data.effectiveness.toFixed(1)}%`;
+                    effectivenessEl.style.color = data.effectiveness > 70 ? '#10b981' : 
+                                                  data.effectiveness > 50 ? '#f59e0b' : '#ef4444';
+                    effectivenessEl.classList.add('pulse');
+                    setTimeout(() => effectivenessEl.classList.remove('pulse'), 500);
+                }
                 
-                // Add new videos with animation
-                newVideos.reverse().forEach(video => {
-                    const li = document.createElement('li');
-                    li.className = 'video-item';
-                    li.style.animation = 'slideIn 0.5s ease-out';
-                    
-                    const title = video.title || video.video_id || '';
-                    const truncatedTitle = title.length > 80 ? title.substring(0, 77) + '...' : title;
-                    
-                    li.innerHTML = `
-                        <div class="video-title">${truncatedTitle}</div>
-                        <div class="video-meta">
-                            By ${video.uploader || 'Unknown'} • 
-                            Downloaded ${formatDate(video.downloaded_at)}
-                        </div>
-                        <div class="video-stats">
-                            <span class="video-stat">👁 ${(video.view_count || 0).toLocaleString()} views</span>
-                            <span class="video-stat">❤️ ${(video.like_count || 0).toLocaleString()} likes</span>
-                            <span class="video-stat">💬 ${(video.comment_count || 0).toLocaleString()} comments</span>
-                        </div>
-                    `;
-                    
-                    videoList.insertBefore(li, videoList.firstChild);
-                    
-                    // Remove oldest items if over 10
-                    while (videoList.children.length > 10) {
-                        videoList.removeChild(videoList.lastChild);
+                // Update percentage change
+                const changeEl = document.getElementById('ml-change');
+                if (data.change !== undefined && data.change !== null) {
+                    const arrow = data.change > 0 ? '↑' : '↓';
+                    changeEl.textContent = `${arrow} ${Math.abs(data.change).toFixed(1)}%`;
+                    changeEl.style.color = data.change > 0 ? '#10b981' : '#ef4444';
+                }
+                
+                // Update other metrics with percentage changes
+                if (data.r2_score !== undefined) {
+                    document.getElementById('ml-r2').textContent = data.r2_score.toFixed(3);
+                    const r2ChangeEl = document.getElementById('ml-r2-change');
+                    if (data.r2_change !== undefined && data.r2_change !== null) {
+                        const arrow = data.r2_change > 0 ? '↑' : '↓';
+                        r2ChangeEl.textContent = `${arrow} ${Math.abs(data.r2_change).toFixed(1)}%`;
+                        // R² higher is better
+                        r2ChangeEl.style.color = data.r2_change > 0 ? '#10b981' : '#ef4444';
                     }
-                });
+                }
+                if (data.mae !== undefined) {
+                    document.getElementById('ml-mae').textContent = data.mae.toFixed(2);
+                    const maeChangeEl = document.getElementById('ml-mae-change');
+                    if (data.mae_change !== undefined && data.mae_change !== null) {
+                        const arrow = data.mae_change > 0 ? '↑' : '↓';
+                        maeChangeEl.textContent = `${arrow} ${Math.abs(data.mae_change).toFixed(1)}%`;
+                        // MAE lower is better, so negative change is good
+                        maeChangeEl.style.color = data.mae_change < 0 ? '#10b981' : '#ef4444';
+                    }
+                }
+                if (data.rmse !== undefined) {
+                    document.getElementById('ml-rmse').textContent = data.rmse.toFixed(2);
+                    const rmseChangeEl = document.getElementById('ml-rmse-change');
+                    if (data.rmse_change !== undefined && data.rmse_change !== null) {
+                        const arrow = data.rmse_change > 0 ? '↑' : '↓';
+                        rmseChangeEl.textContent = `${arrow} ${Math.abs(data.rmse_change).toFixed(1)}%`;
+                        // RMSE lower is better, so negative change is good
+                        rmseChangeEl.style.color = data.rmse_change < 0 ? '#10b981' : '#ef4444';
+                    }
+                }
+                
+                // Update test predictions
+                if (data.test_predictions && data.test_predictions.length > 0) {
+                    const predictionsDiv = document.getElementById('test-predictions');
+                    predictionsDiv.innerHTML = data.test_predictions.map((pred, index) => `
+                        <div class="test-prediction">
+                            <div class="prediction-number">Test ${index + 1}:</div>
+                            <div class="prediction-content">
+                                <div class="prediction-text">${pred.text}</div>
+                            </div>
+                            <div class="prediction-score-wrapper">
+                                <span class="score-label">Predicted virality score:</span>
+                                <div class="prediction-score-bar">
+                                    <div class="score-fill" style="width: ${pred.score}%">
+                                        <span class="score-text">${pred.score.toFixed(1)}/100</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `).join('');
+                }
+                
+                // Update chart if on history tab
+                if (document.getElementById('history-tab').style.display !== 'none' && data.history) {
+                    updatePerformanceChart(data.history);
+                }
                 
             } catch (error) {
-                console.error('Recent videos update error:', error);
+                console.error('ML metrics update error:', error);
             }
+        }
+        
+        function updatePerformanceChart(history) {
+            const ctx = document.getElementById('ml-performance-chart').getContext('2d');
+            
+            // Only recreate chart if it doesn't exist or data length changed
+            if (performanceChart && performanceChart.data.labels.length === history.length) {
+                // Just update the data without recreating
+                const effectiveness = history.map(h => h.effectiveness);
+                performanceChart.data.datasets[0].data = effectiveness;
+                performanceChart.update('none'); // No animation on update
+                return;
+            }
+            
+            if (performanceChart) {
+                performanceChart.destroy();
+            }
+            
+            // Calculate min and max for better scaling
+            const effectiveness = history.map(h => h.effectiveness);
+            const minValue = Math.min(...effectiveness);
+            const maxValue = Math.max(...effectiveness);
+            const padding = (maxValue - minValue) * 0.2 || 10; // 20% padding or 10 if all same
+            
+            // Calculate Y-axis bounds to show variation better
+            const yMin = Math.max(0, minValue - padding);
+            const yMax = Math.min(100, maxValue + padding);
+            
+            // Determine line color based on trend
+            const isImproving = history.length >= 2 && 
+                               history[history.length - 1].effectiveness > history[history.length - 2].effectiveness;
+            const lineColor = isImproving ? '#10b981' : '#ef4444';
+            
+            performanceChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: history.map(h => {
+                        const date = new Date(h.date);
+                        return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                    }),
+                    datasets: [{
+                        label: 'Model Effectiveness (%)',
+                        data: effectiveness,
+                        borderColor: lineColor,
+                        backgroundColor: isImproving ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+                        tension: 0.4,
+                        pointRadius: 4,
+                        pointBackgroundColor: lineColor
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: {
+                        duration: performanceChart ? 0 : 750 // Only animate on first load
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: (context) => `Effectiveness: ${context.parsed.y.toFixed(1)}%`
+                            }
+                        }
+                    },
+                    scales: {
+                        y: {
+                            min: yMin,
+                            max: yMax,
+                            ticks: {
+                                callback: (value) => value.toFixed(0) + '%',
+                                stepSize: (yMax - yMin) / 5 // Show about 5 ticks
+                            },
+                            grid: {
+                                color: 'rgba(0, 0, 0, 0.05)'
+                            }
+                        },
+                        x: {
+                            grid: {
+                                display: false
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        async function updateRecentVideos() {
+            // Function removed - Recent Videos section no longer exists
         }
 
         // Start polling

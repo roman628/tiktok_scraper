@@ -98,6 +98,19 @@ class MLTrainingRun(models.Model):
     ], default='running')
     model_path = models.CharField(max_length=255, blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
+    
+    # New ML performance metrics
+    r2_score = models.FloatField(null=True, blank=True)
+    mae = models.FloatField(null=True, blank=True)
+    rmse = models.FloatField(null=True, blank=True)
+    prediction_range = models.FloatField(null=True, blank=True)
+    prediction_std = models.FloatField(null=True, blank=True)
+    cv_mean = models.FloatField(null=True, blank=True)
+    cv_std = models.FloatField(null=True, blank=True)
+    effectiveness_score = models.FloatField(null=True, blank=True)
+    
+    # Test predictions JSON field
+    test_predictions = models.JSONField(null=True, blank=True)
 
     class Meta:
         db_table = 'ml_training_runs'
@@ -105,6 +118,22 @@ class MLTrainingRun(models.Model):
 
     def __str__(self):
         return f"Training {self.trained_at.strftime('%Y-%m-%d %H:%M')} - {self.model_name}"
+    
+    def calculate_effectiveness(self):
+        """Calculate composite effectiveness score (0-100)"""
+        if not all([self.r2_score is not None, self.mae is not None, self.rmse is not None]):
+            return None
+        
+        # Normalize R² (0-1 → 0-40 points)
+        r2_points = max(0, min(40, self.r2_score * 40))
+        
+        # Normalize MAE (lower is better, assume 0-100 range → 30-0 points)
+        mae_points = max(0, 30 - (min(100, self.mae) / 100 * 30))
+        
+        # Normalize RMSE (lower is better, assume 0-100 range → 30-0 points)
+        rmse_points = max(0, 30 - (min(100, self.rmse) / 100 * 30))
+        
+        return r2_points + mae_points + rmse_points
 
 
 class Transcription(models.Model):
