@@ -21,7 +21,7 @@ Date: 2025-07-31
 import pickle
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import re
 import time
 import logging
@@ -32,16 +32,23 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import tomllib
 import os
+import sys
+
+# Add project root to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from utils.device_manager import DeviceManager
 
 # ML Imports
 try:
-    from sklearn.ensemble import RandomForestRegressor
-    from sklearn.linear_model import Ridge
-    from sklearn.model_selection import train_test_split, cross_val_score
+    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+    from sklearn.linear_model import Ridge, QuantileRegressor
+    from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
     from sklearn.preprocessing import RobustScaler
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
     from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
     from sklearn.decomposition import LatentDirichletAllocation
+    from sklearn.isotonic import IsotonicRegression
+    from sklearn.utils.class_weight import compute_sample_weight
     import xgboost as xgb
     import joblib
 except ImportError as e:
@@ -81,7 +88,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class TikTokPerformancePredictor:
-    """Supervised learning model for predicting TikTok performance from transcripts."""
+    """Supervised learning model for predicting TikTok performance from transcripts.
+    
+    Enhanced with stratified sampling, quantile regression, and calibration to fix
+    score clustering around the mean (65-77 range issue).
+    """
     
     def __init__(self):
         """Initialize the predictor."""
@@ -89,6 +100,17 @@ class TikTokPerformancePredictor:
         self.scaler = RobustScaler()
         self.is_trained = False
         self.feature_names = []
+        
+        # GPU acceleration detection
+        self.device = DeviceManager.get_best_device()
+        self.device_info = DeviceManager.get_device_info()
+        logger.info(f"Device initialized: {self.device}")
+        if self.device == 'cuda':
+            logger.info(f"GPU: {self.device_info['cuda_device_name']}")
+        
+        # Calibration models for score spreading
+        self.isotonic_calibrator = None
+        self.score_percentiles = None
         
         # Initialize NLP components
         try:
@@ -330,8 +352,9 @@ class TikTokPerformancePredictor:
         return min(3.0, bonus)  # Cap at 3 point bonus
     
     def train(self, data_source: Optional[str] = None, test_size: float = 0.2, use_database: bool = True) -> Dict[str, Any]:
-        """Train the model on database data."""
-        logger.info("Starting supervised learning training...")
+        """Train the model on database data with enhanced distribution spreading."""
+        logger.info("Starting enhanced supervised learning training...")
+        logger.info(f"Using device: {self.device}")
         start_time = time.time()
         
         # Load data from database
@@ -366,9 +389,13 @@ class TikTokPerformancePredictor:
         # Extract lists for learning
         all_transcripts = [d['transcript'] for d in training_data]
         all_comments = [d['comments'] for d in training_data]
-        all_scores = [d['score'] for d in training_data]
+        all_scores = np.array([d['score'] for d in training_data])
         
         logger.info(f"Collected {len(all_transcripts)} transcript-comment-score triplets")
+        logger.info(f"Score distribution - Min: {all_scores.min():.1f}, Max: {all_scores.max():.1f}, Mean: {all_scores.mean():.1f}, Std: {all_scores.std():.1f}")
+        
+        # Store percentiles for calibration
+        self.score_percentiles = np.percentile(all_scores, np.arange(0, 101, 1))
         
         # Learn semantic and emotional patterns including comment-content alignment
         self.learn_semantic_patterns(all_transcripts, all_scores, all_comments)
@@ -413,49 +440,119 @@ class TikTokPerformancePredictor:
         logger.info(f"Feature matrix shape: {X.shape}")
         logger.info(f"Score range: {y.min():.1f} - {y.max():.1f}")
         
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=test_size, random_state=42
+        # STRATIFIED SAMPLING: Bin scores for balanced training
+        y_binned = pd.qcut(y, q=5, labels=False, duplicates='drop')  # 5 quantile bins
+        
+        # Split data with stratification
+        X_train, X_test, y_train, y_test, y_train_binned, y_test_binned = train_test_split(
+            X, y, y_binned, test_size=test_size, random_state=42, stratify=y_binned
         )
+        
+        # SAMPLE WEIGHTING: Give more importance to extreme values
+        sample_weights = self._compute_sample_weights(y_train)
+        logger.info(f"Sample weights range: {sample_weights.min():.2f} - {sample_weights.max():.2f}")
         
         # Scale features
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
         
-        # Train ensemble model
-        logger.info("Training ensemble model...")
+        # Train enhanced ensemble model
+        logger.info("Training enhanced ensemble with quantile regression...")
         
-        # Random Forest
+        # Configure XGBoost for GPU if available
+        xgb_params = {
+            'n_estimators': 100,
+            'max_depth': 6,
+            'random_state': 42,
+            'verbose': 0,
+            'learning_rate': 0.1,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8
+        }
+        if self.device == 'cuda':
+            xgb_params['tree_method'] = 'gpu_hist'
+            xgb_params['gpu_id'] = 0
+            logger.info("XGBoost configured for GPU acceleration")
+        
+        # Random Forest with sample weights
         rf_model = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
-        rf_model.fit(X_train_scaled, y_train)
+        rf_model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
         
-        # XGBoost
-        xgb_model = xgb.XGBRegressor(n_estimators=100, max_depth=6, random_state=42, verbose=0)
-        xgb_model.fit(X_train_scaled, y_train)
+        # XGBoost with sample weights
+        xgb_model = xgb.XGBRegressor(**xgb_params)
+        xgb_model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
         
-        # Ridge Regression
+        # QUANTILE REGRESSION: Train models for different percentiles
+        logger.info("Training quantile regressors...")
+        quantile_models = {}
+        for quantile in [0.1, 0.25, 0.5, 0.75, 0.9]:
+            try:
+                # Use QuantileRegressor if available (sklearn >= 1.0)
+                q_model = QuantileRegressor(quantile=quantile, alpha=0.1, solver='highs')
+                q_model.fit(X_train_scaled, y_train)
+                quantile_models[f'q{int(quantile*100)}'] = q_model
+            except:
+                # Fallback to GradientBoosting with quantile loss
+                q_model = GradientBoostingRegressor(
+                    loss='quantile', 
+                    alpha=quantile,
+                    n_estimators=100,
+                    max_depth=5,
+                    random_state=42
+                )
+                q_model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
+                quantile_models[f'q{int(quantile*100)}'] = q_model
+        
+        # Ridge Regression (baseline)
         ridge_model = Ridge(alpha=1.0)
-        ridge_model.fit(X_train_scaled, y_train)
+        ridge_model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
         
-        # Create ensemble
+        # Create enhanced ensemble
         self.model = {
             'rf': rf_model,
             'xgb': xgb_model,
-            'ridge': ridge_model
+            'ridge': ridge_model,
+            **quantile_models  # Add quantile models
         }
         
-        # Evaluate
-        rf_pred = rf_model.predict(X_test_scaled)
-        xgb_pred = xgb_model.predict(X_test_scaled)
-        ridge_pred = ridge_model.predict(X_test_scaled)
+        # ISOTONIC CALIBRATION: Fit on TRAINING data to avoid overfitting
+        logger.info("Fitting isotonic calibration on training set...")
+        train_predictions = {}
+        for name, model in self.model.items():
+            train_predictions[name] = model.predict(X_train_scaled)
         
-        # Ensemble prediction (equal weighting)
-        ensemble_pred = (rf_pred + xgb_pred + ridge_pred) / 3
+        # Get training ensemble predictions
+        train_ensemble = self._compute_ensemble_prediction(train_predictions)
         
-        # Calculate metrics
-        mae = mean_absolute_error(y_test, ensemble_pred)
-        rmse = np.sqrt(mean_squared_error(y_test, ensemble_pred))
-        r2 = r2_score(y_test, ensemble_pred)
+        # Fit calibrator on training data
+        self.isotonic_calibrator = IsotonicRegression(out_of_bounds='clip')
+        self.isotonic_calibrator.fit(train_ensemble, y_train)
+        
+        # Now evaluate on test set
+        test_predictions = {}
+        for name, model in self.model.items():
+            test_predictions[name] = model.predict(X_test_scaled)
+        
+        # Weighted ensemble prediction
+        ensemble_pred = self._compute_ensemble_prediction(test_predictions)
+        
+        # Apply calibration
+        calibrated_pred = self.isotonic_calibrator.transform(ensemble_pred)
+        
+        # Calculate metrics (on calibrated predictions)
+        mae = mean_absolute_error(y_test, calibrated_pred)
+        rmse = np.sqrt(mean_squared_error(y_test, calibrated_pred))
+        r2 = r2_score(y_test, calibrated_pred)
+        
+        # Calculate distribution metrics
+        pred_range = calibrated_pred.max() - calibrated_pred.min()
+        pred_std = calibrated_pred.std()
+        true_range = y_test.max() - y_test.min()
+        true_std = y_test.std()
+        
+        logger.info(f"Prediction range: {calibrated_pred.min():.1f} - {calibrated_pred.max():.1f} (spread: {pred_range:.1f})")
+        logger.info(f"True range: {y_test.min():.1f} - {y_test.max():.1f} (spread: {true_range:.1f})")
+        logger.info(f"Prediction std: {pred_std:.1f}, True std: {true_std:.1f}")
         
         # Cross-validation
         cv_scores = cross_val_score(rf_model, X_train_scaled, y_train, cv=5, scoring='r2')
@@ -478,15 +575,18 @@ class TikTokPerformancePredictor:
             'rmse': rmse,
             'r2_score': r2,
             'cv_mean': cv_scores.mean(),
-            'cv_std': cv_scores.std()
+            'cv_std': cv_scores.std(),
+            'prediction_range': pred_range,
+            'prediction_std': pred_std,
+            'device_used': self.device
         }
     
     def predict_score(self, transcript: str) -> float:
-        """Predict performance score from transcript text using learned viral patterns."""
+        """Predict performance score with enhanced distribution spreading."""
         if not self.is_trained:
             raise ValueError("Model must be trained before making predictions")
         
-        # Extract features from transcript (now includes viral pattern features)
+        # Extract features from transcript
         features = self.extract_features(transcript)
         
         # Add TF-IDF features
@@ -501,16 +601,25 @@ class TikTokPerformancePredictor:
         # Scale features
         feature_vector_scaled = self.scaler.transform([feature_vector])
         
-        # Ensemble prediction with viral pattern learning
-        rf_pred = self.model['rf'].predict(feature_vector_scaled)[0]
-        xgb_pred = self.model['xgb'].predict(feature_vector_scaled)[0]
-        ridge_pred = self.model['ridge'].predict(feature_vector_scaled)[0]
+        # Get predictions from all models
+        predictions = {}
+        for name, model in self.model.items():
+            predictions[name] = model.predict(feature_vector_scaled)[0]
         
-        # Final ensemble score
-        ensemble_score = (rf_pred + xgb_pred + ridge_pred) / 3
+        # Compute weighted ensemble
+        ensemble_score = self._compute_ensemble_prediction(predictions, single_sample=True)
+        
+        # Apply isotonic calibration if available
+        if self.isotonic_calibrator is not None:
+            calibrated_score = self.isotonic_calibrator.transform([ensemble_score])[0]
+        else:
+            calibrated_score = ensemble_score
+        
+        # Apply confidence-based spreading
+        final_score = self._apply_confidence_spreading(calibrated_score, predictions)
         
         # Clamp to 0-100 range
-        return max(0, min(100, ensemble_score))
+        return max(0, min(100, final_score))
     
     def save_model(self, model_path: str):
         """Save the trained model."""
@@ -523,7 +632,10 @@ class TikTokPerformancePredictor:
             'feature_names': self.feature_names,
             'is_trained': self.is_trained,
             'learned_patterns': self.learned_patterns,
-            'tfidf_vectorizer': self.tfidf_vectorizer
+            'tfidf_vectorizer': self.tfidf_vectorizer,
+            'isotonic_calibrator': self.isotonic_calibrator,
+            'score_percentiles': self.score_percentiles,
+            'device_trained_on': self.device
         }
         
         joblib.dump(model_data, model_path)
@@ -543,6 +655,12 @@ class TikTokPerformancePredictor:
         self.is_trained = model_data['is_trained']
         self.learned_patterns = model_data.get('learned_patterns', {})
         self.tfidf_vectorizer = model_data.get('tfidf_vectorizer', None)
+        self.isotonic_calibrator = model_data.get('isotonic_calibrator', None)
+        self.score_percentiles = model_data.get('score_percentiles', None)
+        
+        # Log device info
+        trained_device = model_data.get('device_trained_on', 'unknown')
+        logger.info(f"Model was trained on: {trained_device}, current device: {self.device}")
         
         # Reinitialize NLP components if not already done
         if not hasattr(self, 'sia') or self.sia is None:
@@ -1493,6 +1611,118 @@ class TikTokPerformancePredictor:
                 pass
         
         return trigger_patterns
+    
+    def _compute_sample_weights(self, scores: np.ndarray) -> np.ndarray:
+        """Compute sample weights to emphasize extreme values.
+        
+        Args:
+            scores: Array of performance scores
+            
+        Returns:
+            Array of sample weights
+        """
+        # Create weight bins - higher weight for extreme values
+        weights = np.ones_like(scores)
+        
+        # Very low scores (0-20) get 3x weight
+        weights[scores < 20] = 3.0
+        
+        # Low scores (20-40) get 2x weight
+        weights[(scores >= 20) & (scores < 40)] = 2.0
+        
+        # Middle scores (40-60) get normal weight
+        weights[(scores >= 40) & (scores < 60)] = 1.0
+        
+        # High scores (60-80) get normal weight
+        weights[(scores >= 60) & (scores < 80)] = 1.0
+        
+        # Very high scores (80-100) get 3x weight
+        weights[scores >= 80] = 3.0
+        
+        # Normalize weights
+        weights = weights / weights.mean()
+        
+        return weights
+    
+    def _compute_ensemble_prediction(self, predictions: Dict[str, np.ndarray], 
+                                    single_sample: bool = False) -> np.ndarray:
+        """Compute weighted ensemble prediction with emphasis on quantile models.
+        
+        Args:
+            predictions: Dictionary of model predictions
+            single_sample: Whether this is a single sample (scalar) or array
+            
+        Returns:
+            Weighted ensemble prediction
+        """
+        if single_sample:
+            # For single predictions
+            base_pred = (predictions['rf'] + predictions['xgb'] + predictions['ridge']) / 3
+            
+            # Average quantile predictions for spread
+            quantile_preds = []
+            for key in predictions:
+                if key.startswith('q'):
+                    quantile_preds.append(predictions[key])
+            
+            if quantile_preds:
+                # Weight: 60% base models, 40% quantile models
+                quantile_avg = np.mean(quantile_preds)
+                ensemble = 0.6 * base_pred + 0.4 * quantile_avg
+            else:
+                ensemble = base_pred
+                
+            return ensemble
+        else:
+            # For array predictions
+            base_pred = (predictions['rf'] + predictions['xgb'] + predictions['ridge']) / 3
+            
+            # Collect quantile predictions
+            quantile_preds = []
+            for key in predictions:
+                if key.startswith('q'):
+                    quantile_preds.append(predictions[key])
+            
+            if quantile_preds:
+                # Stack and average quantile predictions
+                quantile_stack = np.column_stack(quantile_preds)
+                quantile_avg = quantile_stack.mean(axis=1)
+                
+                # Weight: 60% base models, 40% quantile models
+                ensemble = 0.6 * base_pred + 0.4 * quantile_avg
+            else:
+                ensemble = base_pred
+                
+            return ensemble
+    
+    def _apply_confidence_spreading(self, base_score: float, 
+                                   predictions: Dict[str, float]) -> float:
+        """Apply confidence-based spreading to push predictions away from mean.
+        
+        Args:
+            base_score: Base calibrated score
+            predictions: Dictionary of all model predictions
+            
+        Returns:
+            Score with confidence-based spreading applied
+        """
+        # Use the calibrated score directly with minor adjustments
+        # The isotonic calibration already handles most of the spreading
+        
+        # Calculate model agreement
+        all_preds = list(predictions.values())
+        pred_std = np.std(all_preds)
+        
+        # Only apply minor adjustments based on model confidence
+        if pred_std > 25:  # High disagreement - models uncertain
+            # Slightly reduce extreme predictions
+            if base_score > 80:
+                return base_score * 0.95
+            elif base_score < 20:
+                return base_score * 1.05
+        
+        # Return calibrated score as-is for most cases
+        return base_score
 
 
 def predict_performance_score(transcript: str) -> float:

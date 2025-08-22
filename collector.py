@@ -37,6 +37,7 @@ from src.transcript_extractor import TranscriptExtractor
 from utils.display_manager import create_display
 from utils.worker_progress import WorkerProgress
 from utils.collector_registry import CollectorRegistry, CollectorConfig
+from utils.worker_manager import WorkerManager
 
 # For compatibility with existing code
 from src.video_extractor import VideoExtractor
@@ -230,15 +231,24 @@ class RobustTikTokProcessor:
             print(f"  Drained {drained_results} results, {drained_display} display messages")
     
     async def process_urls(self, urls: List[str], download_kwargs: Dict[str, Any]):
-        """Process all URLs using worker processes (even if just 1 worker)."""
+        """Process all URLs using worker processes with robust management."""
         self.state.total_urls = len(urls)
         print(f"\nProcessing {len(urls)} URLs with {self.args.workers} worker(s)...")
+        
+        # Initialize worker manager for robust tracking
+        worker_manager = WorkerManager(
+            db_config=self.config.get('database', {}),
+            worker_count=self.args.workers
+        )
+        worker_manager.init_worker_tracking_table()
+        worker_manager.cleanup_stuck_urls()
         
         # Setup multiprocessing components
         manager = mp.Manager()
         url_queue = manager.Queue()
         result_queue = manager.Queue()
         display_queue = manager.Queue()
+        status_queue = worker_manager.status_queue  # Dedicated status queue
         shutdown_event = manager.Event()
         
         # Add URLs to queue
@@ -275,12 +285,14 @@ class RobustTikTokProcessor:
                 'compute_type': 'float16' if device.lower() in ['cuda', 'mps'] else 'int8'
             }
         
-        # Create workers
+        # Create workers with enhanced management
         workers = []
+        from utils.worker_manager import enhanced_worker_process
         for i in range(self.args.workers):
+            worker_manager.register_worker(i)
             p = mp.Process(
-                target=worker_process_wrapper,
-                args=(i, url_queue, result_queue, display_queue, shutdown_event,
+                target=enhanced_worker_process,
+                args=(i, url_queue, result_queue, status_queue, display_queue, shutdown_event,
                       self.args, download_kwargs, self.ms_token, whisper_config, len(urls), self.config)
             )
             p.start()
@@ -302,7 +314,8 @@ class RobustTikTokProcessor:
         stall_check_interval = 60  # Check for stalls every 60 seconds
         
         try:
-            while workers_done < self.args.workers:
+            # Use database-based completion detection instead of queue counting
+            while not worker_manager.detect_completion(workers):
                 loop_iteration_start = time.time()
                 
                 # DEADLOCK DETECTION: Check for overall timeout
@@ -311,23 +324,38 @@ class RobustTikTokProcessor:
                     shutdown_event.set()
                     break
                 
-                # DEADLOCK DETECTION: Check for progress stall
-                if workers_done == last_workers_done:
+                # Process status updates from workers
+                status_updates = worker_manager.process_status_updates(timeout=0.1)
+                
+                # Check worker health and detect stalls
+                worker_health = worker_manager.check_worker_health()
+                active_count = worker_manager.get_active_worker_count()
+                completed_count = worker_manager.get_completed_worker_count()
+                
+                # Track workers_done for backward compatibility
+                workers_done = completed_count
+                
+                # Improved stall detection with database tracking
+                if completed_count == last_workers_done:
                     if loop_iteration_start - last_progress_time > stall_check_interval:
                         print(f"\n⚠️ WARNING: No progress for {stall_check_interval}s, checking worker health...")
                         alive_workers = sum(1 for w in workers if w.is_alive())
-                        print(f"  Alive workers: {alive_workers}/{len(workers)}, Workers done: {workers_done}")
+                        print(f"  Alive: {alive_workers}/{len(workers)}, Active: {active_count}, Completed: {completed_count}")
                         
-                        if alive_workers == 0:
-                            print("  ❌ All workers dead, forcing shutdown")
+                        # Check for dead workers and reassign their work
+                        dead_workers = worker_manager.cleanup_dead_workers(workers)
+                        if dead_workers:
+                            print(f"  ✓ Cleaned up {len(dead_workers)} dead workers and reassigned their URLs")
+                        
+                        if alive_workers == 0 and completed_count < self.args.workers:
+                            print("  ❌ All workers dead before completion")
                             break
-                        elif alive_workers < len(workers) - workers_done:
-                            print(f"  ⚠️ Some workers died unexpectedly, may need intervention")
-                            # Give it one more minute before giving up
-                            stall_check_interval = 30
+                        elif active_count == 0 and completed_count == self.args.workers:
+                            print("  ✓ All workers completed successfully")
+                            break
                 else:
                     last_progress_time = loop_iteration_start
-                    last_workers_done = workers_done
+                    last_workers_done = completed_count
                     stall_check_interval = 60  # Reset to normal interval
                 
                 # Update display

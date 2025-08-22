@@ -102,13 +102,15 @@ class TranscriptExtractor:
                 segments_list.append(segment.text.strip())
                 
                 # Update progress based on segment end time
-                if progress_callback and total_duration > 0:
+                if progress_callback and total_duration > 0 and hasattr(segment, 'end'):
                     current_time = segment.end
-                    progress_callback.update_transcription(current_time, total_duration)
+                    percent_complete = (current_time / total_duration) * 100
+                    # Call with percent, current_time, total_duration
+                    progress_callback(percent_complete, current_time, total_duration)
             
             # Ensure we report 100% completion
             if progress_callback and total_duration > 0:
-                progress_callback.update_transcription(total_duration, total_duration)
+                progress_callback(100.0, total_duration, total_duration)
             
             # Combine segments into full transcript
             transcript = " ".join(segments_list)
