@@ -39,10 +39,6 @@ from utils.worker_progress import WorkerProgress
 from utils.collector_registry import CollectorRegistry, CollectorConfig
 from utils.worker_manager import WorkerManager
 
-# For compatibility with existing code
-from src.video_extractor import VideoExtractor
-download_single_video = VideoExtractor().download_single_video
-
 class RobustTikTokProcessor:
     """Main processor for TikTok data collection."""
     
@@ -147,11 +143,25 @@ class RobustTikTokProcessor:
                 filtered.append(url)
         return filtered
     
-    def _start_watchdog_thread(self, workers, shutdown_event):
-        """Start a watchdog thread to monitor for deadlocks and worker health."""
+    def _start_watchdog_thread(self, workers, shutdown_event, result_queue=None, status_queue=None):
+        """Start a watchdog thread to monitor for deadlocks and worker health.
+        
+        Args:
+            workers: List of worker processes
+            shutdown_event: Event to trigger shutdown
+            result_queue: Queue where workers send results (for progress tracking)
+            status_queue: Queue where workers send status updates (for heartbeat tracking)
+        """
         def watchdog():
-            last_check = time.time()
+            last_progress_time = time.time()
+            last_processed_count = 0
             stall_count = 0
+            last_heartbeat_time = time.time()
+            
+            # For recalibration mode, be more patient (transcription can take time)
+            is_recalibrate = getattr(self, 'recalibrate_mode', False)
+            stall_timeout = 600 if is_recalibrate else 300  # 10 min for recalibrate, 5 min normal
+            max_stall_checks = 6 if is_recalibrate else 3  # More patience for recalibration
             
             while not shutdown_event.is_set():
                 time.sleep(10)  # Check every 10 seconds
@@ -164,20 +174,61 @@ class RobustTikTokProcessor:
                     shutdown_event.set()
                     break
                 
-                # Check for extended stalls (workers alive but not producing)
+                # Track actual progress via the state object
+                current_processed = getattr(self.state, 'processed_urls', 0)
                 current_time = time.time()
-                if current_time - last_check > 120:  # 2 minutes without activity
+                
+                # Check if we're making progress
+                if current_processed > last_processed_count:
+                    # Progress detected! Reset stall detection
+                    last_progress_time = current_time
+                    last_processed_count = current_processed
+                    stall_count = 0  # Reset stall counter
+                    if is_recalibrate:
+                        print(f"  ✅ Watchdog: Progress detected - {current_processed} URLs processed")
+                
+                # Check for heartbeats from status queue (if available)
+                if status_queue:
+                    try:
+                        # Non-blocking check for any status updates
+                        import queue
+                        while True:
+                            try:
+                                status = status_queue.get_nowait()
+                                if status.get('type') == 'heartbeat':
+                                    last_heartbeat_time = current_time
+                                # Put it back for main loop to process
+                                status_queue.put(status)
+                                break
+                            except queue.Empty:
+                                break
+                    except:
+                        pass  # Queue might not be available
+                
+                # Check for extended stalls (workers alive but not producing results)
+                time_since_progress = current_time - last_progress_time
+                time_since_heartbeat = current_time - last_heartbeat_time
+                
+                # Only consider it a stall if no progress AND no recent heartbeats
+                if time_since_progress > 120 and time_since_heartbeat > 60:  # 2 min no progress, 1 min no heartbeat
                     stall_count += 1
-                    if stall_count >= 3:  # 6 minutes total
-                        print(f"\n🔴 Watchdog: Extended stall detected ({stall_count * 2} minutes), forcing shutdown")
+                    if stall_count >= max_stall_checks:
+                        print(f"\n🔴 Watchdog: Extended stall detected (no progress for {int(time_since_progress)}s), forcing shutdown")
+                        print(f"    Last progress: {last_processed_count} URLs processed")
+                        print(f"    Workers alive: {alive_count}/{len(workers)}")
                         shutdown_event.set()
                         break
                     else:
-                        print(f"\n⚠️ Watchdog: Possible stall detected (check {stall_count}/3)")
+                        print(f"\n⚠️ Watchdog: Possible stall detected (check {stall_count}/{max_stall_checks})")
+                        print(f"    No progress for {int(time_since_progress)}s")
+                        print(f"    Workers alive: {alive_count}/{len(workers)}")
                 
                 # Log periodic health status
                 if int(current_time) % 60 == 0:  # Every minute
-                    print(f"  🟢 Watchdog: {alive_count}/{len(workers)} workers alive")
+                    status_msg = f"  🟢 Watchdog: {alive_count}/{len(workers)} workers alive"
+                    if current_processed > 0:
+                        status_msg += f", {current_processed} URLs processed"
+                    print(status_msg)
         
         watchdog_thread = threading.Thread(target=watchdog, daemon=True, name="CollectorWatchdog")
         watchdog_thread.start()
@@ -259,11 +310,19 @@ class RobustTikTokProcessor:
         for _ in range(self.args.workers):
             url_queue.put(None)
         
-        # Setup display
+        # Setup display - detect subprocess and force simple mode
         display_mode = getattr(self.args, 'display_mode', 'auto')
+        
+        # Force simple mode if running as subprocess
+        if os.environ.get('COLLECTOR_SUBPROCESS') or not sys.stdout.isatty():
+            display_mode = 'simple'
+        
         raw_log_path = None
         if getattr(self.args, 'raw_log', False):
-            raw_log_path = f"processing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            # Use logs directory from config
+            logs_dir = self.config.get('display', {}).get('raw_log_dir', 'logs')
+            os.makedirs(logs_dir, exist_ok=True)
+            raw_log_path = os.path.join(logs_dir, f"processing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         
         display_manager = create_display(
             self.args.workers,
@@ -299,7 +358,7 @@ class RobustTikTokProcessor:
             workers.append(p)
         
         # Start watchdog thread for additional monitoring
-        watchdog = self._start_watchdog_thread(workers, shutdown_event)
+        watchdog = self._start_watchdog_thread(workers, shutdown_event, result_queue, status_queue)
         
         # Process results
         processed = 0
@@ -506,6 +565,10 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
     Returns:
         Dict with 'success' bool and 'video_data' if successful or 'error' if failed.
     """
+    # Check if we're in recalibrate mode
+    recalibrate_mode = download_kwargs.get('recalibrate_mode', False)
+    recalibrate_components = download_kwargs.get('recalibrate_components', [])
+    
     # Check data collection config
     data_collection_config = config.get('data_collection', {}) if config else {}
     
@@ -518,8 +581,12 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
     if data_collection_config.get('comments', False):
         enabled_collectors.append('comments')
     
-    # Check for duplicate (unless force_redownload is enabled)
-    if not args.force_redownload and data_manager.is_duplicate(url):
+    # In recalibrate mode, log what we're doing
+    if recalibrate_mode:
+        progress.send_log(f"Recalibrating: {', '.join(recalibrate_components)}", 'info')
+    
+    # Check for duplicate (unless force_redownload is enabled or recalibrate mode)
+    if not args.force_redownload and not recalibrate_mode and data_manager.is_duplicate(url):
         progress.send_log("Skipping duplicate", 'info')
         return {'success': True, 'duplicate': True}
     
@@ -528,12 +595,40 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
         return {'success': False, 'error': 'Shutdown requested'}
     
     try:
-        # Download video
+        # In recalibrate mode, check if we need to download or just transcribe
+        if recalibrate_mode and 'transcripts' in recalibrate_components:
+            # Try to find existing video file for this URL
+            import glob
+            
+            # Extract video ID from URL
+            # Import moved to top of file to avoid repeated imports
+            url_proc = URLProcessor()
+            video_id = url_proc.extract_video_id(url)
+            
+            # Look for existing video file in configured output directory
+            video_files = glob.glob(f"{args.output}/*{video_id}*")
+            
+            if video_files:
+                # File exists, just transcribe it
+                progress.send_log(f"Found existing file: {video_files[0]}", 'info')
+                # We'll call download_single_video which should detect the existing file
+            else:
+                # No local file, need to download it first
+                progress.send_log("No local file found, downloading video first", 'info')
+                # The download_single_video call below will handle downloading
+        
+        # Download video (or use existing in recalibrate mode)
         progress.start_download()
         
         # Setup whisper model if needed - check if transcription is enabled
         whisper_model = None
         use_whisper = 'transcription' in enabled_collectors and download_kwargs.get('use_whisper', False)
+        
+        # Force whisper for transcript recalibration
+        if recalibrate_mode and 'transcripts' in recalibrate_components:
+            use_whisper = True
+            args.whisper = True
+        
         if args.whisper and whisper_config and use_whisper:
             whisper_model = whisper_config.get('model')
         
@@ -545,6 +640,7 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
             whisper_device=whisper_config.get('device', 'CPU').upper() if whisper_config else 'CPU',
             shutdown_event=shutdown_event,
             progress_callback=progress
+            # In recalibrate mode, it will download if file doesn't exist, or use existing if it does
         )
         
         progress.send_progress('downloading', 100)
@@ -629,11 +725,27 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
         
         # Save to master file
         progress.start_saving()
-        data_manager.append_to_master(video_data)
+        
+        # In recalibrate mode, update existing video; otherwise insert new
+        if recalibrate_mode:
+            # Update existing video components
+            success = data_manager.update_video_components(video_data)
+            if success:
+                progress.send_log("Updated video components in database", 'success')
+            else:
+                progress.send_log("Failed to update video components", 'error')
+                return {'success': False, 'error': 'Failed to update database'}
+        else:
+            # Normal mode - insert new video
+            result = data_manager.append_to_master(video_data)
+            if not result:
+                progress.send_log("Failed to insert video", 'error')
+                return {'success': False, 'error': 'Failed to insert to database'}
+        
         # Update cache for duplicate detection
         if hasattr(data_manager, 'existing_urls'):
             data_manager.existing_urls.add(url)
-        # DatabaseOrJsonManager handles this internally
+        
         progress.complete_saving()
         
         # Cleanup if needed
@@ -976,6 +1088,12 @@ async def main():
     parser.add_argument("--force-redownload", action="store_true", help="Ignore duplicates")
     parser.add_argument("--clean-progress", action="store_true", help="Start fresh")
     
+    # Recalibration options
+    parser.add_argument("--recalibrate", type=str, nargs='?', const='auto',
+                       help="Fill missing data for existing videos. Options: auto, transcripts, comments, metadata")
+    parser.add_argument("--recalibrate-limit", type=int, default=None,
+                       help="Limit number of videos to recalibrate")
+    
     # System options
     parser.add_argument("--proxy", type=str, help="Proxy URL")
     parser.add_argument("--workers", type=int, default=1, help="Number of worker processes")
@@ -997,6 +1115,78 @@ async def main():
     
     # Database is now primary storage - no JSON output needed
     args.json_output = None
+    
+    # Handle recalibration mode first
+    if args.recalibrate:
+        from src.database_manager import DatabaseOrJsonManager
+        from src.recalibrator import Recalibrator
+        
+        print("\n🔧 Recalibration Mode")
+        
+        # Setup database connection
+        db_config = config.get('database', {})
+        if not db_config.get('enabled', True):
+            print("Error: Database is disabled in config.toml. Recalibration requires database.")
+            return
+        
+        data_manager = DatabaseOrJsonManager(config)
+        
+        # Create recalibrator
+        recalibrator = Recalibrator(data_manager, config)
+        
+        # Determine components to process
+        components_requested = None if args.recalibrate == 'auto' else args.recalibrate
+        components = recalibrator.get_components_to_process(components_requested)
+        
+        if not components:
+            print("No components available for recalibration.")
+            print("Check config.toml settings (use_whisper, ms_token, etc.)")
+            return
+        
+        # Get videos needing recalibration
+        videos = recalibrator.get_videos_needing_recalibration(
+            components, 
+            args.recalibrate_limit
+        )
+        
+        # Show summary
+        print(recalibrator.format_summary(videos, components))
+        
+        if not videos:
+            return
+        
+        # Create processor for recalibration
+        processor = RobustTikTokProcessor(args, config)
+        processor.recalibrate_mode = True  # Set flag for special processing
+        
+        # Override some args for recalibration mode
+        args.force_redownload = False  # Don't redownload existing videos
+        if 'transcripts' in components:
+            args.whisper = True
+        
+        # Process videos (reusing existing infrastructure)
+        print(f"\n📊 Processing {len(videos)} videos with {args.workers} worker(s)...")
+        
+        # Extract URLs for processing
+        urls = [v['url'] for v in videos]
+        
+        # Prepare download kwargs with recalibrate flag
+        download_kwargs = {
+            'output_dir': args.output,
+            'quality': args.quality,
+            'audio_only': args.mp3,
+            'use_whisper': args.whisper,
+            'proxy': args.proxy,
+            'recalibrate_mode': True,  # Special flag for recalibration
+            'recalibrate_components': components  # Which components to process
+        }
+        
+        # Process the URLs with recalibration flag
+        await processor.process_urls(urls, download_kwargs)
+        
+        print("\n✅ Recalibration complete")
+        data_manager.close()
+        return
     
     # Auto-discovery logic - check database queue first
     # This mode enables continuous processing of the queue

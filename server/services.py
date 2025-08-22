@@ -207,19 +207,31 @@ class CollectorService:
         logger.info(f"🚀 Starting collector.py in continuous mode to process queue")
         logger.info(f"📊 Current queue: {pending_count} pending URL(s)")
         
-        # Build command - no arguments, uses config.toml and database queue
-        cmd = ['python', 'collector.py']
+        # Build command - force simple display mode for subprocess compatibility
+        cmd = ['python', 'collector.py', '--display-mode', 'simple']
         
         # Log full command
         logger.info(f"Command: {' '.join(cmd)}")
         
-        # Run collector.py in background
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=settings.BASE_DIR  # Run from project root
-        )
+        # Create log file for this collector run
+        import datetime
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_dir = os.path.join(settings.BASE_DIR, 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        log_file_path = os.path.join(log_dir, f'collector_{timestamp}.log')
+        
+        logger.info(f"Collector output will be logged to: {log_file_path}")
+        
+        # Run collector.py in background with output to log file
+        with open(log_file_path, 'w') as log_file:
+            process = subprocess.Popen(
+                cmd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,  # Merge stderr into stdout
+                cwd=settings.BASE_DIR,  # Run from project root
+                bufsize=1,  # Line buffered
+                universal_newlines=True  # Text mode
+            )
         
         # Store the process reference
         CollectorService._collector_process = process
@@ -279,6 +291,30 @@ class CollectorService:
         except Exception as e:
             logger.warning(f"Could not get collector stats: {e}")
         return None
+    
+    @staticmethod
+    def get_latest_log():
+        """Get the latest collector log file content"""
+        log_dir = os.path.join(settings.BASE_DIR, 'logs')
+        if not os.path.exists(log_dir):
+            return None
+            
+        # Find the most recent collector log file
+        log_files = [f for f in os.listdir(log_dir) if f.startswith('collector_') and f.endswith('.log')]
+        if not log_files:
+            return None
+            
+        latest_log = max(log_files, key=lambda f: os.path.getmtime(os.path.join(log_dir, f)))
+        log_path = os.path.join(log_dir, latest_log)
+        
+        try:
+            # Read last 100 lines
+            with open(log_path, 'r') as f:
+                lines = f.readlines()
+                return ''.join(lines[-100:])
+        except Exception as e:
+            logger.error(f"Error reading log file: {e}")
+            return None
     
     @staticmethod
     def mark_failed(url: str, error_message: str):

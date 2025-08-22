@@ -398,6 +398,26 @@ class DatabaseManager:
             return set()
     
     @retry_on_connection_error()
+    def get_video_db_id(self, video_id_str: str) -> Optional[int]:
+        """
+        Get database ID for a video by its TikTok video_id
+        
+        Args:
+            video_id_str: TikTok video ID string (e.g., "7532447162072894775")
+            
+        Returns:
+            Database ID (integer) or None if not found
+        """
+        try:
+            with self.get_cursor() as cursor:
+                cursor.execute("SELECT id FROM videos WHERE video_id = %s", (video_id_str,))
+                result = cursor.fetchone()
+                return result[0] if result else None
+        except psycopg2.Error as e:
+            logger.error(f"Failed to get video DB ID for {video_id_str}: {e}")
+            return None
+    
+    @retry_on_connection_error()
     def get_videos_for_ml(self, limit: Optional[int] = None) -> List[Dict]:
         """
         Get videos for ML training
@@ -456,6 +476,78 @@ class DatabaseManager:
         except psycopg2.Error as e:
             logger.error(f"Failed to update transcription: {e}")
             raise
+    
+    @retry_on_connection_error()
+    def get_incomplete_videos(self, components: List[str], limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Get videos with missing data components.
+        
+        Args:
+            components: List of component names ('transcripts', 'comments', 'metadata')
+            limit: Maximum number of videos to return
+            
+        Returns:
+            List of video dicts with missing component info
+        """
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # Build query based on components
+                    conditions = []
+                    
+                    if 'transcripts' in components:
+                        conditions.append("""
+                            (t.id IS NULL OR t.whisper_transcription IS NULL OR t.whisper_transcription = '')
+                        """)
+                    
+                    if 'comments' in components:
+                        conditions.append("""
+                            (ps.comments_extracted IS FALSE OR ps.comments_extracted IS NULL)
+                        """)
+                    
+                    if 'metadata' in components:
+                        conditions.append("""
+                            (v.duration IS NULL OR v.width IS NULL OR v.height IS NULL)
+                        """)
+                    
+                    if not conditions:
+                        return []
+                    
+                    query = f"""
+                        SELECT DISTINCT
+                            v.id,
+                            v.video_id,
+                            v.url,
+                            v.title,
+                            v.downloaded_at,
+                            CASE WHEN t.id IS NOT NULL AND t.whisper_transcription IS NOT NULL 
+                                 AND t.whisper_transcription != '' THEN true ELSE false END as has_transcription,
+                            COALESCE(ps.comments_extracted, false) as has_comments,
+                            CASE WHEN v.duration IS NOT NULL AND v.width IS NOT NULL 
+                                 AND v.height IS NOT NULL THEN true ELSE false END as has_complete_metadata
+                        FROM videos v
+                        LEFT JOIN transcriptions t ON v.id = t.video_id
+                        LEFT JOIN processing_status ps ON v.id = ps.video_id
+                        WHERE {' OR '.join(conditions)}
+                        ORDER BY v.downloaded_at DESC
+                    """
+                    
+                    if limit:
+                        query += f" LIMIT {limit}"
+                    
+                    cursor.execute(query)
+                    
+                    columns = [desc[0] for desc in cursor.description]
+                    videos = []
+                    for row in cursor.fetchall():
+                        video = dict(zip(columns, row))
+                        videos.append(video)
+                    
+                    return videos
+                    
+        except psycopg2.Error as e:
+            logger.error(f"Failed to get incomplete videos: {e}")
+            return []
     
     @retry_on_connection_error()
     def add_comments(self, video_id: int, comments: List[Dict]):
@@ -597,6 +689,95 @@ class DatabaseOrJsonManager:
             return self.manager.get_existing_urls()
         else:
             return self.manager.existing_urls
+    
+    def get_incomplete_videos(self, components: List[str], limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Get videos with missing data components.
+        
+        Args:
+            components: List of component names to check ('transcripts', 'comments', 'metadata')
+            limit: Maximum number of videos to return
+            
+        Returns:
+            List of video dicts with missing component info
+        """
+        if not self.use_database:
+            return []
+        
+        # Delegate to DatabaseManager
+        return self.manager.get_incomplete_videos(components, limit)
+    
+    def update_video_components(self, video_data: Dict[str, Any]) -> bool:
+        """
+        Update specific components of an existing video (for recalibration).
+        
+        Args:
+            video_data: Video data dictionary with components to update
+            
+        Returns:
+            True if update successful, False otherwise
+        """
+        # Extract video_id from data or URL
+        video_id_str = video_data.get('video_id')
+        if not video_id_str and video_data.get('url'):
+            import re
+            match = re.search(r'/video/(\d+)', video_data['url'])
+            if match:
+                video_id_str = match.group(1)
+        
+        if not video_id_str:
+            logger.error("Cannot extract video_id from video_data")
+            return False
+        
+        # Get database ID
+        db_id = self.manager.get_video_db_id(video_id_str)
+        if not db_id:
+            logger.error(f"Video not found in database: {video_id_str}")
+            return False
+        
+        logger.info(f"Updating components for video DB ID {db_id} (TikTok ID: {video_id_str})")
+        
+        # Update transcription if present
+        if video_data.get('whisper_transcription'):
+            try:
+                self.manager.update_transcription(
+                    db_id, 
+                    video_data['whisper_transcription'],
+                    video_data.get('model_used', 'whisper')
+                )
+                logger.info(f"Updated transcription for video {db_id}")
+            except Exception as e:
+                logger.error(f"Failed to update transcription: {e}")
+                return False
+        
+        # Update comments if present
+        if video_data.get('top_comments'):
+            try:
+                # Note: add_comments method might need to be created if it doesn't exist
+                # For now, we'll use the existing insert_comments through a transaction
+                with self.manager.get_connection() as conn:
+                    with conn.cursor() as cursor:
+                        self.manager._insert_comments(
+                            cursor, 
+                            db_id, 
+                            video_data['top_comments'],
+                            video_data.get('comments_extracted_at')
+                        )
+                        # Update processing status for comments
+                        cursor.execute("""
+                            UPDATE processing_status 
+                            SET comments_extracted = true, 
+                                comments_extracted_at = %s,
+                                updated_at = NOW()
+                            WHERE video_id = %s
+                        """, (video_data.get('comments_extracted_at'), db_id))
+                        conn.commit()
+                logger.info(f"Updated comments for video {db_id}")
+            except Exception as e:
+                logger.error(f"Failed to update comments: {e}")
+                return False
+        
+        return True
     
     def close(self):
         """Clean up resources"""

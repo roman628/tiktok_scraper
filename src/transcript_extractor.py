@@ -105,12 +105,12 @@ class TranscriptExtractor:
                 if progress_callback and total_duration > 0 and hasattr(segment, 'end'):
                     current_time = segment.end
                     percent_complete = (current_time / total_duration) * 100
-                    # Call with percent, current_time, total_duration
-                    progress_callback(percent_complete, current_time, total_duration)
+                    # Call update_transcription method on WorkerProgress object
+                    progress_callback.update_transcription(current_time, total_duration)
             
             # Ensure we report 100% completion
             if progress_callback and total_duration > 0:
-                progress_callback(100.0, total_duration, total_duration)
+                progress_callback.update_transcription(total_duration, total_duration)
             
             # Combine segments into full transcript
             transcript = " ".join(segments_list)
