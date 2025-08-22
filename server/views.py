@@ -313,7 +313,7 @@ class CollectorCompleteView(View):
                                 MLTrainingRun.objects.create(
                                     model_name='TikTokPerformancePredictor',
                                     model_version='1.0',
-                                    training_data_count=urls_processed,
+                                    training_samples=urls_processed,
                                     status='completed'
                                 )
                             else:
@@ -321,7 +321,7 @@ class CollectorCompleteView(View):
                                 MLTrainingRun.objects.create(
                                     model_name='TikTokPerformancePredictor',
                                     model_version='1.0',
-                                    training_data_count=urls_processed,
+                                    training_samples=urls_processed,
                                     status='failed',
                                     notes=result.stderr[:500]  # Store first 500 chars of error
                                 )
