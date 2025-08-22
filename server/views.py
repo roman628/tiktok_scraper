@@ -91,13 +91,38 @@ class ProcessingStatusView(APIView):
         # Get collector statistics
         collector_stats = CollectorService.get_collector_stats()
         
+        # Get last collector run
+        last_collector_run = None
+        try:
+            last_run = CollectorRun.objects.filter(status='completed').order_by('-ended_at').first()
+            if last_run:
+                last_collector_run = last_run.ended_at.isoformat() if last_run.ended_at else None
+        except:
+            pass
+        
+        # Get last ML training run
+        last_ml_training = None
+        try:
+            last_training = MLTrainingRun.objects.filter(status='completed').order_by('-ended_at').first()
+            if last_training:
+                last_ml_training = last_training.ended_at.isoformat() if last_training.ended_at else None
+        except:
+            pass
+        
+        # Get total video count
+        from .models import Video
+        total_videos = Video.objects.count()
+        
         response_data = {
             'collector_running': collector_running,
             'pending': pending,
             'processing': processing,
             'completed': completed,
             'failed': failed,
-            'total': pending + processing + completed + failed
+            'total': pending + processing + completed + failed,
+            'total_videos': total_videos,
+            'last_collector_run': last_collector_run,
+            'last_ml_training': last_ml_training
         }
         
         # Add collector stats if available

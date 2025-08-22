@@ -256,7 +256,7 @@ psql -U $USER -d tiktok_scraper -c "SELECT * FROM database_statistics;"
 
 # Export to JSON if needed
 python -c "from src.database_manager import DatabaseManager; 
-db = DatabaseManager(user='ethan', database='tiktok_scraper'); 
+db = DatabaseManager(user='postgres', database='tiktok_scraper'); 
 db.export_to_json('export.json')"
 
 # Migration from JSON
@@ -269,7 +269,7 @@ python database/migrate_json_to_postgres.py data/master2.json
 enabled = true    # Use PostgreSQL (recommended)
 host = "localhost"
 database = "tiktok_scraper"
-user = "ethan"
+user = "postgres"
 ```
 
 ## Development Guidelines
@@ -290,7 +290,7 @@ The system has been fully migrated to PostgreSQL as the primary storage mechanis
 - The `master2.json` file is no longer created or updated
 - When testing, use `--force-redownload` to bypass duplicate detection
 - Test scripts export from database using `DatabaseManager.export_to_json()` for validation
-- Default database user is 'ethan' (not 'postgres')
+- Default database user is 'postgres'
 - The system will error if database connection fails - there's no JSON fallback
 
 **NOTE** comment extraction has been patched indefinitely and there is nothing we can do as of 8/20/2025 to fix it 
