@@ -25,4 +25,8 @@ urlpatterns = [
     
     # Collector completion notification
     path('api/collector-complete/', views.CollectorCompleteView.as_view(), name='collector-complete'),
+    
+    # ML training status signals
+    path('api/ml/start/', views.MLTrainingStartView.as_view(), name='ml-training-start'),
+    path('api/ml/end/', views.MLTrainingEndView.as_view(), name='ml-training-end'),
 ]

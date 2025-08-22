@@ -33,6 +33,7 @@ from psycopg2.extras import RealDictCursor
 import tomllib
 import os
 import sys
+import requests
 
 # Add project root to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -2267,6 +2268,19 @@ def predict_performance_score(transcript: str) -> float:
         return 0.0
 
 
+def signal_training_status(status: str) -> None:
+    """Send training status to dashboard server. Fails silently if server is down."""
+    try:
+        url = f'http://localhost:8000/api/ml/{status}/'
+        response = requests.post(url, timeout=1)
+        if response.status_code == 200:
+            logging.info(f"✅ ML training {status} signal sent to dashboard")
+    except Exception:
+        # Server not running or request failed - continue anyway
+        logging.debug(f"Could not send ML training {status} signal (server may be down)")
+        pass
+
+
 def main():
     """Enhanced command line interface for Reddit→TikTok virality prediction."""
     import sys
@@ -2342,6 +2356,9 @@ Examples:
         predictor = TikTokPerformancePredictor()
         print("\nStarting training...")
         
+        # Signal training start to dashboard
+        signal_training_status('start')
+        
         start_time = time.time()
         metrics = predictor.train(filter_reddit_like=args.filter_reddit)
         
@@ -2349,6 +2366,9 @@ Examples:
         model_dir = Path(args.model).parent
         model_dir.mkdir(exist_ok=True)
         predictor.save_model(args.model)
+        
+        # Signal training end to dashboard
+        signal_training_status('end')
         
         print("\n" + "=" * 80)
         print("Training Complete!")

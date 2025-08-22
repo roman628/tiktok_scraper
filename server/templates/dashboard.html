@@ -230,6 +230,13 @@
             </div>
             
             <div class="stat-card">
+                <div class="stat-label">ML Training Status</div>
+                <div class="stat-value" id="ml-training-status">
+                    <span class="status-indicator status-stopped"></span>Idle
+                </div>
+            </div>
+            
+            <div class="stat-card">
                 <div class="stat-label">Last Collector Run</div>
                 <div class="stat-value date-value" id="last-collector-run">
                     {% if last_collector_date %}
@@ -382,6 +389,26 @@
                 if (lastCollectorEl.innerHTML !== lastCollectorFormatted) {
                     lastCollectorEl.innerHTML = lastCollectorFormatted;
                     addPulseAnimation(lastCollectorEl.parentElement);
+                }
+                
+                // Update ML Training Status
+                const mlStatusEl = document.getElementById('ml-training-status');
+                const mlIsTraining = data.ml_training_active;
+                const currentMLStatus = mlStatusEl.innerHTML.includes('Training');
+                
+                if (mlIsTraining !== currentMLStatus) {
+                    if (mlIsTraining) {
+                        mlStatusEl.innerHTML = '<span class="status-indicator status-running"></span>Training';
+                        // Show when training started if available
+                        if (data.ml_training_started_at) {
+                            const startedTime = formatDate(data.ml_training_started_at);
+                            mlStatusEl.title = `Started: ${startedTime}`;
+                        }
+                    } else {
+                        mlStatusEl.innerHTML = '<span class="status-indicator status-stopped"></span>Idle';
+                        mlStatusEl.title = '';
+                    }
+                    addPulseAnimation(mlStatusEl.parentElement);
                 }
                 
                 // Update Last ML Training

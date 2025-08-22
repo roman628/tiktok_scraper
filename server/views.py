@@ -100,12 +100,22 @@ class ProcessingStatusView(APIView):
         except:
             pass
         
-        # Get last ML training run
+        # Get last ML training run and check if currently training
         last_ml_training = None
+        ml_training_active = False
+        ml_training_started_at = None
+        
         try:
-            last_training = MLTrainingRun.objects.filter(status='completed').order_by('-ended_at').first()
+            # Check for active training
+            active_training = MLTrainingRun.objects.filter(status='running').order_by('-trained_at').first()
+            if active_training:
+                ml_training_active = True
+                ml_training_started_at = active_training.trained_at.isoformat() if active_training.trained_at else None
+            
+            # Get last completed training
+            last_training = MLTrainingRun.objects.filter(status='completed').order_by('-trained_at').first()
             if last_training:
-                last_ml_training = last_training.ended_at.isoformat() if last_training.ended_at else None
+                last_ml_training = last_training.trained_at.isoformat() if last_training.trained_at else None
         except:
             pass
         
@@ -122,7 +132,9 @@ class ProcessingStatusView(APIView):
             'total': pending + processing + completed + failed,
             'total_videos': total_videos,
             'last_collector_run': last_collector_run,
-            'last_ml_training': last_ml_training
+            'last_ml_training': last_ml_training,
+            'ml_training_active': ml_training_active,
+            'ml_training_started_at': ml_training_started_at
         }
         
         # Add collector stats if available
@@ -370,6 +382,62 @@ class CollectorCompleteView(View):
             })
         except Exception as e:
             logger.error(f"Error processing collector completion: {e}")
+            return JsonResponse({'error': str(e)}, status=500)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class MLTrainingStartView(View):
+    """Signal that ML training has started"""
+    
+    def post(self, request):
+        try:
+            # Create or update MLTrainingRun record
+            training_run = MLTrainingRun.objects.create(
+                model_name='snoo',
+                status='running',
+                trained_at=datetime.now()
+            )
+            
+            logger.info("🎯 ML training started signal received")
+            
+            return JsonResponse({
+                'status': 'acknowledged',
+                'training_id': training_run.id
+            })
+        except Exception as e:
+            logger.error(f"Error processing ML start signal: {e}")
+            return JsonResponse({'error': str(e)}, status=500)
+
+
+@method_decorator(csrf_exempt, name='dispatch')
+class MLTrainingEndView(View):
+    """Signal that ML training has ended"""
+    
+    def post(self, request):
+        try:
+            # Get the most recent running training
+            training_run = MLTrainingRun.objects.filter(status='running').order_by('-trained_at').first()
+            
+            if training_run:
+                # Update status to completed
+                training_run.status = 'completed'
+                training_run.save()
+                logger.info(f"✅ ML training completed signal received for training {training_run.id}")
+            else:
+                # Create a completed entry if no running one exists
+                training_run = MLTrainingRun.objects.create(
+                    model_name='snoo',
+                    status='completed',
+                    trained_at=datetime.now()
+                )
+                logger.info("✅ ML training completed signal received (no prior start signal)")
+            
+            return JsonResponse({
+                'status': 'acknowledged',
+                'training_id': training_run.id if training_run else None
+            })
+        except Exception as e:
+            logger.error(f"Error processing ML end signal: {e}")
             return JsonResponse({'error': str(e)}, status=500)
 
 
