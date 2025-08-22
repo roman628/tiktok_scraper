@@ -56,6 +56,14 @@ except ImportError as e:
     print("Install with: pip install scikit-learn xgboost joblib")
     exit(1)
 
+# Sentence Transformer imports (optional but recommended)
+try:
+    from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+    # Logger not initialized yet, will warn later
+
 # NLP Imports
 try:
     import nltk
@@ -86,6 +94,11 @@ except LookupError:
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Log sentence transformer availability
+if not SENTENCE_TRANSFORMERS_AVAILABLE:
+    logger.info("sentence-transformers not installed. Using TF-IDF only.")
+    logger.info("For better semantic understanding, install with: pip install sentence-transformers")
 
 class TikTokPerformancePredictor:
     """Supervised learning model for predicting TikTok performance from transcripts.
@@ -124,6 +137,19 @@ class TikTokPerformancePredictor:
         # TF-IDF vectorizer (will be fitted during training)
         self.tfidf_vectorizer = None
         
+        # Sentence transformer for semantic embeddings
+        self.sentence_transformer = None
+        self.embedding_dim = None
+        if SENTENCE_TRANSFORMERS_AVAILABLE:
+            try:
+                # Use a smaller, faster model for efficiency
+                self.sentence_transformer = SentenceTransformer('all-MiniLM-L6-v2')
+                self.embedding_dim = 384  # Dimension of all-MiniLM-L6-v2
+                logger.info("Sentence transformer loaded: all-MiniLM-L6-v2")
+            except Exception as e:
+                logger.warning(f"Could not load sentence transformer: {e}")
+                self.sentence_transformer = None
+        
         # Discovered patterns from data (no assumptions about what matters)
         self.learned_patterns = {
             'content_patterns': {},
@@ -136,8 +162,12 @@ class TikTokPerformancePredictor:
             'curiosity_words': []
         }
     
-    def _load_from_database(self) -> List[Dict]:
-        """Load training data from PostgreSQL database using config.toml settings."""
+    def _load_from_database(self, filter_reddit_like: bool = True) -> List[Dict]:
+        """Load training data from PostgreSQL database using config.toml settings.
+        
+        Args:
+            filter_reddit_like: If True, filter for Reddit-like content (text-heavy narratives)
+        """
         # Load database config
         config_path = Path(__file__).parent.parent / 'config.toml'
         if not config_path.exists():
@@ -147,6 +177,7 @@ class TikTokPerformancePredictor:
             config = tomllib.load(f)
         
         db_config = config.get('database', {})
+        ml_config = config.get('ml', {})
         if not db_config.get('enabled', True):
             raise ValueError("Database is disabled in config.toml")
         
@@ -166,8 +197,16 @@ class TikTokPerformancePredictor:
         conn = psycopg2.connect(**conn_params, cursor_factory=RealDictCursor)
         cursor = conn.cursor()
         
+        # Get filter settings from config
+        min_duration = ml_config.get('min_duration', 45)
+        min_words = ml_config.get('min_words', 150)
+        min_words_per_second = ml_config.get('min_words_per_second', 2.0)
+        
+        # Build query with optional filtering for Reddit-like content
+        duration_filter = f"AND v.duration >= {min_duration}" if filter_reddit_like else ""
+        
         # Query to get data from gold layer (or silver if gold not ready)
-        query = """
+        query = f"""
             SELECT 
                 v.video_id,
                 v.url,
@@ -181,6 +220,13 @@ class TikTokPerformancePredictor:
                 v.upload_date,
                 v.duration,
                 t.whisper_transcription,
+                -- Calculate transcription metrics
+                array_length(string_to_array(t.whisper_transcription, ' '), 1) as word_count,
+                CASE 
+                    WHEN v.duration > 0 THEN 
+                        array_length(string_to_array(t.whisper_transcription, ' '), 1)::float / v.duration 
+                    ELSE 0 
+                END as words_per_second,
                 -- Get comments as JSONB array
                 COALESCE(
                     (SELECT jsonb_agg(
@@ -206,6 +252,7 @@ class TikTokPerformancePredictor:
             WHERE v.view_count IS NOT NULL
             AND t.whisper_transcription IS NOT NULL
             AND LENGTH(t.whisper_transcription) > 10
+            {duration_filter}
             ORDER BY v.downloaded_at DESC
         """
         
@@ -215,15 +262,42 @@ class TikTokPerformancePredictor:
             
             # Convert to list of dicts matching expected format
             videos = []
+            filtered_count = 0
+            total_count = 0
+            
             for row in results:
                 video = dict(row)
+                total_count += 1
+                
+                # Apply Reddit-like content filtering
+                if filter_reddit_like:
+                    word_count = video.get('word_count', 0) or 0
+                    words_per_second = video.get('words_per_second', 0) or 0
+                    duration = video.get('duration', 0) or 0
+                    
+                    # Filter criteria: substantial talking content
+                    # 1. Has enough words (>150) OR decent speaking rate (>2 words/sec)
+                    has_substantial_talking = (word_count > min_words) or (words_per_second > min_words_per_second)
+                    
+                    # 2. Not pure music/dance (very low transcription density)
+                    expected_words = duration * 2.5  # Average speaking rate
+                    is_not_music_dance = word_count > (expected_words * 0.1)  # At least 10% of expected
+                    
+                    if not (has_substantial_talking and is_not_music_dance):
+                        filtered_count += 1
+                        continue
+                
                 # Ensure comments is a list
                 if isinstance(video.get('comments'), str):
-                    # Comments already parsed from jsonb in PostgreSQL
-                    pass  # Already in correct format
+                    pass  # Already in correct format from jsonb
                 elif video.get('comments') is None:
                     video['comments'] = []
+                    
                 videos.append(video)
+            
+            if filter_reddit_like:
+                logger.info(f"Filtered {filtered_count}/{total_count} videos to focus on Reddit-like content")
+                logger.info(f"Retained {len(videos)} videos with substantial narrative/talking content")
             
             return videos
             
@@ -351,14 +425,20 @@ class TikTokPerformancePredictor:
         
         return min(3.0, bonus)  # Cap at 3 point bonus
     
-    def train(self, data_source: Optional[str] = None, test_size: float = 0.2, use_database: bool = True) -> Dict[str, Any]:
-        """Train the model on database data with enhanced distribution spreading."""
+    def train(self, data_source: Optional[str] = None, test_size: float = 0.2, use_database: bool = True, 
+              filter_reddit_like: bool = True) -> Dict[str, Any]:
+        """Train the model on database data with enhanced distribution spreading.
+        
+        Args:
+            filter_reddit_like: If True, filter training data to Reddit-like content
+        """
         logger.info("Starting enhanced supervised learning training...")
         logger.info(f"Using device: {self.device}")
+        logger.info(f"Reddit-like filtering: {filter_reddit_like}")
         start_time = time.time()
         
-        # Load data from database
-        videos = self._load_from_database()
+        # Load data from database with optional filtering
+        videos = self._load_from_database(filter_reddit_like=filter_reddit_like)
         logger.info(f"Loaded {len(videos)} videos from database")
         
         # First pass: collect transcripts, comments and calculate scores
@@ -403,6 +483,11 @@ class TikTokPerformancePredictor:
         # Fit TF-IDF on all transcripts
         self.fit_tfidf(all_transcripts)
         
+        # Pre-compute sentence embeddings if available
+        if self.sentence_transformer:
+            logger.info("Computing sentence embeddings for training data...")
+            self._precompute_embeddings(all_transcripts)
+        
         # Second pass: extract features using learned patterns
         logger.info("Extracting features using learned patterns...")
         feature_dicts = []
@@ -419,6 +504,11 @@ class TikTokPerformancePredictor:
                 # Add TF-IDF features
                 tfidf_features = self.extract_tfidf_features(data['transcript'])
                 features.update(tfidf_features)
+                
+                # Add sentence embedding features if available
+                if self.sentence_transformer:
+                    embedding_features = self.extract_embedding_features(data['transcript'], index=i)
+                    features.update(embedding_features)
                 
                 feature_dicts.append(features)
                 final_scores.append(data['score'])
@@ -482,15 +572,17 @@ class TikTokPerformancePredictor:
         xgb_model = xgb.XGBRegressor(**xgb_params)
         xgb_model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
         
-        # QUANTILE REGRESSION: Train models for different percentiles
-        logger.info("Training quantile regressors...")
+        # QUANTILE REGRESSION: Train models for different percentiles including extremes
+        logger.info("Training quantile regressors (including extreme quantiles 0.05 and 0.95)...")
         quantile_models = {}
-        for quantile in [0.1, 0.25, 0.5, 0.75, 0.9]:
+        # Add extreme quantiles for better spread
+        for quantile in [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]:
             try:
                 # Use QuantileRegressor if available (sklearn >= 1.0)
                 q_model = QuantileRegressor(quantile=quantile, alpha=0.1, solver='highs')
                 q_model.fit(X_train_scaled, y_train)
                 quantile_models[f'q{int(quantile*100)}'] = q_model
+                logger.info(f"Trained quantile model for q{int(quantile*100)}")
             except:
                 # Fallback to GradientBoosting with quantile loss
                 q_model = GradientBoostingRegressor(
@@ -502,6 +594,7 @@ class TikTokPerformancePredictor:
                 )
                 q_model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
                 quantile_models[f'q{int(quantile*100)}'] = q_model
+                logger.info(f"Trained GradientBoosting quantile model for q{int(quantile*100)}")
         
         # Ridge Regression (baseline)
         ridge_model = Ridge(alpha=1.0)
@@ -593,6 +686,11 @@ class TikTokPerformancePredictor:
         tfidf_features = self.extract_tfidf_features(transcript)
         features.update(tfidf_features)
         
+        # Add sentence embedding features if available
+        if self.sentence_transformer:
+            embedding_features = self.extract_embedding_features(transcript)
+            features.update(embedding_features)
+        
         # Convert to array with correct feature order
         feature_vector = np.zeros(len(self.feature_names))
         for i, feature_name in enumerate(self.feature_names):
@@ -635,7 +733,9 @@ class TikTokPerformancePredictor:
             'tfidf_vectorizer': self.tfidf_vectorizer,
             'isotonic_calibrator': self.isotonic_calibrator,
             'score_percentiles': self.score_percentiles,
-            'device_trained_on': self.device
+            'device_trained_on': self.device,
+            'sentence_transformer_model': 'all-MiniLM-L6-v2' if self.sentence_transformer else None,
+            'embedding_cache': getattr(self, 'embedding_cache', None)
         }
         
         joblib.dump(model_data, model_path)
@@ -657,6 +757,20 @@ class TikTokPerformancePredictor:
         self.tfidf_vectorizer = model_data.get('tfidf_vectorizer', None)
         self.isotonic_calibrator = model_data.get('isotonic_calibrator', None)
         self.score_percentiles = model_data.get('score_percentiles', None)
+        
+        # Load sentence transformer if it was used during training
+        transformer_model = model_data.get('sentence_transformer_model', None)
+        if transformer_model and SENTENCE_TRANSFORMERS_AVAILABLE:
+            try:
+                self.sentence_transformer = SentenceTransformer(transformer_model)
+                self.embedding_dim = 384
+                self.embedding_cache = model_data.get('embedding_cache', {})
+                logger.info(f"Loaded sentence transformer: {transformer_model}")
+            except Exception as e:
+                logger.warning(f"Could not load sentence transformer: {e}")
+                self.sentence_transformer = None
+        else:
+            self.sentence_transformer = None
         
         # Log device info
         trained_device = model_data.get('device_trained_on', 'unknown')
@@ -704,6 +818,15 @@ class TikTokPerformancePredictor:
         
         # Readability metrics
         features.update(self._extract_readability_features(transcript))
+        
+        # NEW: Narrative arc detection
+        features.update(self._extract_narrative_arc_features(transcript, sentences))
+        
+        # NEW: Information density and controversy
+        features.update(self._extract_information_density_features(transcript, words, sentences))
+        
+        # NEW: Reddit-specific patterns
+        features.update(self._extract_reddit_patterns(transcript, words, sentences))
         
         return features
     
@@ -969,6 +1092,382 @@ class TikTokPerformancePredictor:
             features['flesch_kincaid_grade'] = 0.0
         
         return features
+    
+    def _extract_narrative_arc_features(self, transcript: str, sentences: List[str]) -> Dict[str, float]:
+        """Extract narrative arc and emotional journey features.
+        
+        This captures how the emotional tone changes throughout the content,
+        which is crucial for Reddit-style storytelling.
+        """
+        features = {}
+        
+        if len(sentences) < 3 or not self.sia:
+            return {
+                'emotional_arc_volatility': 0.0,
+                'emotional_arc_range': 0.0,
+                'emotional_arc_trend': 0.0,
+                'narrative_tension_peak': 0.0,
+                'narrative_resolution': 0.0
+            }
+        
+        # Calculate sentiment for each sentence
+        sentence_sentiments = []
+        for sentence in sentences:
+            sentiment = self.sia.polarity_scores(sentence)
+            sentence_sentiments.append(sentiment['compound'])
+        
+        # Narrative arc metrics
+        features['emotional_arc_volatility'] = np.std(sentence_sentiments)
+        features['emotional_arc_range'] = max(sentence_sentiments) - min(sentence_sentiments)
+        features['emotional_arc_trend'] = sentence_sentiments[-1] - sentence_sentiments[0]
+        
+        # Find narrative tension peak (highest emotional intensity)
+        peak_intensity = max(abs(s) for s in sentence_sentiments)
+        peak_position = [abs(s) for s in sentence_sentiments].index(peak_intensity) / len(sentence_sentiments)
+        features['narrative_tension_peak'] = peak_intensity
+        features['narrative_tension_position'] = peak_position  # 0=beginning, 1=end
+        
+        # Resolution score (how much emotion settles at the end)
+        if len(sentence_sentiments) >= 5:
+            beginning_avg = np.mean(sentence_sentiments[:2])
+            ending_avg = np.mean(sentence_sentiments[-2:])
+            features['narrative_resolution'] = abs(ending_avg) - abs(beginning_avg)
+        else:
+            features['narrative_resolution'] = 0.0
+        
+        # Three-act structure detection
+        if len(sentence_sentiments) >= 6:
+            third = len(sentence_sentiments) // 3
+            act1 = np.mean(sentence_sentiments[:third])
+            act2 = np.mean(sentence_sentiments[third:2*third])
+            act3 = np.mean(sentence_sentiments[2*third:])
+            
+            # Classic narrative: setup (neutral) -> conflict (intense) -> resolution
+            features['three_act_structure'] = abs(act2) - (abs(act1) + abs(act3)) / 2
+        else:
+            features['three_act_structure'] = 0.0
+        
+        return features
+    
+    def _precompute_embeddings(self, transcripts: List[str]) -> None:
+        """Pre-compute sentence embeddings for training efficiency."""
+        if not self.sentence_transformer:
+            return
+        
+        logger.info(f"Computing embeddings for {len(transcripts)} transcripts...")
+        self.embedding_cache = {}
+        
+        # Process in batches for efficiency
+        batch_size = 32
+        for i in range(0, len(transcripts), batch_size):
+            batch = transcripts[i:i+batch_size]
+            # Truncate very long texts to first 512 tokens (model limit)
+            batch_truncated = [t[:2000] for t in batch]  # Roughly 512 tokens
+            try:
+                embeddings = self.sentence_transformer.encode(batch_truncated, show_progress_bar=False)
+                for j, embedding in enumerate(embeddings):
+                    self.embedding_cache[i + j] = embedding
+            except Exception as e:
+                logger.warning(f"Error computing embeddings for batch {i}: {e}")
+        
+        logger.info(f"Computed {len(self.embedding_cache)} embeddings")
+    
+    def extract_embedding_features(self, transcript: str, index: Optional[int] = None) -> Dict[str, float]:
+        """Extract sentence embedding features.
+        
+        Args:
+            transcript: Text to embed
+            index: Optional index for cached embeddings during training
+        """
+        features = {}
+        
+        if not self.sentence_transformer:
+            return features
+        
+        try:
+            # Use cached embedding if available (during training)
+            if index is not None and hasattr(self, 'embedding_cache') and index in self.embedding_cache:
+                embedding = self.embedding_cache[index]
+            else:
+                # Compute embedding (truncate to model limit)
+                truncated = transcript[:2000]  # Roughly 512 tokens
+                embedding = self.sentence_transformer.encode([truncated], show_progress_bar=False)[0]
+            
+            # Add embedding dimensions as features
+            # Use PCA-like reduction: take top components
+            # Instead of all 384 dimensions, use top 50 most informative
+            for i in range(min(50, len(embedding))):
+                features[f'emb_{i}'] = float(embedding[i])
+            
+            # Add aggregate embedding statistics
+            features['emb_mean'] = float(np.mean(embedding))
+            features['emb_std'] = float(np.std(embedding))
+            features['emb_max'] = float(np.max(embedding))
+            features['emb_min'] = float(np.min(embedding))
+            
+        except Exception as e:
+            logger.warning(f"Error extracting embedding features: {e}")
+            # Return zero features on error
+            for i in range(50):
+                features[f'emb_{i}'] = 0.0
+            features['emb_mean'] = 0.0
+            features['emb_std'] = 0.0
+            features['emb_max'] = 0.0
+            features['emb_min'] = 0.0
+        
+        return features
+    
+    def _extract_information_density_features(self, transcript: str, words: List[str], 
+                                            sentences: List[str]) -> Dict[str, float]:
+        """Extract information density and controversy indicators.
+        
+        These features help identify content that provides value or sparks engagement,
+        which is crucial for Reddit-style educational or controversial content.
+        """
+        features = {}
+        
+        # Information density metrics
+        unique_words = set(words)
+        features['vocabulary_diversity'] = len(unique_words) / max(len(words), 1)
+        
+        # Fact/claim indicators (things that could be verified or disputed)
+        fact_indicators = ['study', 'research', 'percent', '%', 'found', 'shows', 'proves',
+                          'data', 'statistics', 'report', 'survey', 'analysis', 'evidence']
+        fact_count = sum(1 for word in words if word in fact_indicators)
+        features['fact_claim_density'] = fact_count / max(len(words), 1) * 100
+        
+        # Number/statistic density (concrete information)
+        number_count = sum(1 for word in words if any(c.isdigit() for c in word))
+        features['number_density'] = number_count / max(len(words), 1) * 100
+        
+        # Controversy indicators (Reddit-style debate triggers)
+        controversy_words = [
+            'actually', 'wrong', 'myth', 'truth', 'real', 'fake', 'debate', 'controversial',
+            'unpopular', 'opinion', 'believe', 'think', 'disagree', 'argue', 'proof',
+            'evidence', 'clearly', 'obviously', 'definitely', 'never', 'always', 'everyone',
+            'nobody', 'impossible', 'guaranteed', 'fact', 'fiction', 'lie', 'honest'
+        ]
+        controversy_count = sum(1 for word in words if word in controversy_words)
+        features['controversy_score'] = controversy_count / max(len(words), 1) * 100
+        
+        # Explanation depth (educational content indicator)
+        explanation_words = ['because', 'therefore', 'thus', 'hence', 'so', 'means',
+                           'explains', 'reason', 'why', 'how', 'what', 'when', 'where']
+        explanation_count = sum(1 for word in words if word in explanation_words)
+        features['explanation_depth'] = explanation_count / max(len(words), 1) * 100
+        
+        # List/enumeration detection (common in educational Reddit posts)
+        list_indicators = ['first', 'second', 'third', 'finally', 'lastly', 'one', 'two',
+                          'three', '1', '2', '3', 'a)', 'b)', 'c)', '-', '•']
+        has_list = sum(1 for indicator in list_indicators if indicator in transcript)
+        features['has_enumeration'] = min(1.0, has_list / 3)  # Normalize to 0-1
+        
+        # Information chunks (average facts/claims per sentence)
+        if sentences:
+            features['info_chunks_per_sentence'] = fact_count / len(sentences)
+        else:
+            features['info_chunks_per_sentence'] = 0.0
+        
+        # Specificity score (specific vs vague language)
+        specific_words = ['specifically', 'exactly', 'precisely', 'particular', 'certain',
+                         'example', 'instance', 'case', 'situation', 'scenario']
+        specific_count = sum(1 for word in words if word in specific_words)
+        features['specificity_score'] = specific_count / max(len(words), 1) * 100
+        
+        # Call-to-action or engagement triggers
+        cta_phrases = ['what do you think', 'let me know', 'comment below', 'tell me',
+                      'share your', 'have you ever', 'did you know', 'imagine if']
+        cta_count = sum(1 for phrase in cta_phrases if phrase in transcript)
+        features['engagement_cta_score'] = cta_count
+        
+        return features
+    
+    def _extract_reddit_patterns(self, transcript: str, words: List[str], 
+                                sentences: List[str]) -> Dict[str, float]:
+        """Extract Reddit-specific content patterns.
+        
+        These patterns are common in Reddit posts and help identify
+        content that originated from or would work well on Reddit.
+        """
+        features = {}
+        
+        # Reddit-style disclaimers and meta-commentary
+        reddit_disclaimers = [
+            'edit:', 'update:', 'tldr', 'tl;dr', 'obligatory', 'throwaway',
+            'long post', 'sorry for', 'english is not my', 'on mobile',
+            'first time posting', 'long time lurker', 'delete if not allowed'
+        ]
+        disclaimer_count = sum(1 for phrase in reddit_disclaimers if phrase in transcript)
+        features['reddit_disclaimer_count'] = disclaimer_count
+        
+        # AITA (Am I The Asshole) patterns
+        aita_patterns = [
+            'aita', 'am i the', 'was i wrong', 'did i overreact', 'am i being',
+            'judge me', 'need perspective', 'outside opinion', 'am i crazy'
+        ]
+        aita_score = sum(1 for pattern in aita_patterns if pattern in transcript)
+        features['aita_pattern_score'] = aita_score
+        
+        # Story continuation indicators
+        continuation_patterns = [
+            'part 2', 'part two', 'continued', 'update:', 'follow up',
+            'what happened next', 'fast forward', 'few days later', 'update post'
+        ]
+        has_continuation = sum(1 for pattern in continuation_patterns if pattern in transcript)
+        features['has_continuation_pattern'] = min(1.0, has_continuation)
+        
+        # Relationship/drama indicators (popular on Reddit)
+        relationship_words = [
+            'boyfriend', 'girlfriend', 'husband', 'wife', 'ex', 'partner',
+            'relationship', 'cheating', 'divorce', 'breakup', 'dating',
+            'mother', 'father', 'sister', 'brother', 'family', 'parents'
+        ]
+        relationship_count = sum(1 for word in words if word in relationship_words)
+        features['relationship_content_score'] = relationship_count / max(len(words), 1) * 100
+        
+        # Reddit-style humor and self-awareness
+        humor_patterns = [
+            '/s', 'lol', 'lmao', 'edit: spelling', 'edit: grammar',
+            'thanks for the gold', 'rip inbox', 'this blew up', 'front page'
+        ]
+        humor_count = sum(1 for pattern in humor_patterns if pattern in transcript)
+        features['reddit_humor_score'] = humor_count
+        
+        # Advice-seeking patterns
+        advice_patterns = [
+            'what should i', 'what would you', 'need advice', 'help me',
+            'what do i do', 'should i', 'would you', 'is it normal',
+            'has anyone', 'does anyone', 'can someone explain'
+        ]
+        advice_count = sum(1 for pattern in advice_patterns if pattern in transcript)
+        features['advice_seeking_score'] = advice_count
+        
+        # List format detection (common in educational Reddit posts)
+        numbered_list = sum(1 for s in sentences if any(s.strip().startswith(str(i)) for i in range(1, 10)))
+        bullet_list = sum(1 for s in sentences if s.strip().startswith(('-', '•', '*')))
+        features['has_list_format'] = min(1.0, (numbered_list + bullet_list) / 3)
+        
+        # "Today I Learned" (TIL) patterns
+        til_patterns = [
+            'today i learned', 'til', 'fun fact', 'did you know',
+            'interesting fact', 'i just learned', 'apparently', 'turns out'
+        ]
+        til_score = sum(1 for pattern in til_patterns if pattern in transcript)
+        features['til_pattern_score'] = til_score
+        
+        # Malicious compliance / revenge story patterns
+        revenge_patterns = [
+            'malicious compliance', 'revenge', 'got back at', 'sweet justice',
+            'karma', 'instant karma', 'backfired', 'tables turned', 'showed them'
+        ]
+        revenge_score = sum(1 for pattern in revenge_patterns if pattern in transcript)
+        features['revenge_story_score'] = revenge_score
+        
+        # "Choosing Beggar" patterns
+        cb_patterns = [
+            'for free', 'exposure', 'do it for', 'its for church',
+            'next!', 'not good enough', 'can you do', 'but i need'
+        ]
+        cb_score = sum(1 for pattern in cb_patterns if pattern in transcript)
+        features['choosing_beggar_score'] = cb_score
+        
+        # Credibility boosters (common in Reddit stories)
+        credibility_patterns = [
+            'i work as', 'i am a', 'professional', 'years of experience',
+            'certified', 'licensed', 'phd', 'doctor', 'lawyer', 'engineer',
+            'source:', 'proof:', 'verified', 'confirmed'
+        ]
+        credibility_count = sum(1 for pattern in credibility_patterns if pattern in transcript)
+        features['credibility_boost_score'] = credibility_count
+        
+        # Meta-Reddit references
+        meta_patterns = [
+            'reddit', 'redditor', 'subreddit', 'karma', 'upvote', 'downvote',
+            'op', 'original poster', 'crosspost', 'repost'
+        ]
+        meta_count = sum(1 for pattern in meta_patterns if pattern in transcript)
+        features['reddit_meta_score'] = meta_count
+        
+        # Calculate overall "Reddit-ness" score
+        reddit_scores = [
+            disclaimer_count * 2,  # Disclaimers are very Reddit-specific
+            aita_score * 1.5,
+            relationship_count,
+            advice_count,
+            til_score,
+            meta_count * 2  # Direct Reddit references
+        ]
+        features['overall_reddit_score'] = sum(reddit_scores) / max(len(words), 1) * 100
+        
+        return features
+    
+    def filter_training_data(self, videos: List[Dict], progressive: bool = True) -> List[Dict]:
+        """Apply progressive filtering to training data for Reddit-like content.
+        
+        Args:
+            videos: List of video dictionaries
+            progressive: If True, apply filtering progressively (start loose, get stricter)
+            
+        Returns:
+            Filtered list of videos
+        """
+        logger.info(f"Starting progressive filtering on {len(videos)} videos")
+        
+        # Stage 1: Basic quality filter
+        stage1 = []
+        for video in videos:
+            transcript = video.get('whisper_transcription', '')
+            duration = video.get('duration', 0)
+            
+            # Skip very short or no-transcript videos
+            if not transcript or duration < 30:
+                continue
+                
+            stage1.append(video)
+        
+        logger.info(f"Stage 1: {len(stage1)}/{len(videos)} videos passed basic quality filter")
+        
+        if not progressive:
+            return stage1
+        
+        # Stage 2: Content density filter
+        stage2 = []
+        for video in stage1:
+            transcript = video.get('whisper_transcription', '')
+            duration = video.get('duration', 0)
+            word_count = len(transcript.split())
+            
+            # Calculate speaking density
+            words_per_second = word_count / max(duration, 1)
+            
+            # Keep videos with substantial talking (not music/dance)
+            if words_per_second > 1.5 or word_count > 100:
+                stage2.append(video)
+        
+        logger.info(f"Stage 2: {len(stage2)}/{len(stage1)} videos passed content density filter")
+        
+        # Stage 3: Narrative quality filter
+        stage3 = []
+        for video in stage2:
+            transcript = video.get('whisper_transcription', '')
+            
+            # Check for narrative indicators
+            has_sentences = len(sent_tokenize(transcript)) > 3
+            has_structure = any(word in transcript.lower() for word in 
+                              ['then', 'after', 'because', 'but', 'so', 'when'])
+            
+            if has_sentences and has_structure:
+                stage3.append(video)
+        
+        logger.info(f"Stage 3: {len(stage3)}/{len(stage2)} videos passed narrative quality filter")
+        
+        # Ensure we don't filter out too much
+        min_retention = 0.3  # Keep at least 30% of original
+        if len(stage3) < len(videos) * min_retention:
+            logger.warning(f"Progressive filtering too aggressive, using stage 2 results")
+            return stage2
+        
+        return stage3
     
     def _get_zero_features(self) -> Dict[str, float]:
         """Return zero features for empty transcript."""
@@ -1706,23 +2205,48 @@ class TikTokPerformancePredictor:
         Returns:
             Score with confidence-based spreading applied
         """
-        # Use the calibrated score directly with minor adjustments
-        # The isotonic calibration already handles most of the spreading
+        # Enhanced spreading using quantile predictions
+        spread_score = base_score
         
-        # Calculate model agreement
+        # Use quantile predictions to determine spread direction
+        if 'q10' in predictions and 'q90' in predictions:
+            q10 = predictions['q10']
+            q90 = predictions['q90']
+            q50 = predictions.get('q50', base_score)
+            
+            # Calculate quantile spread
+            quantile_range = q90 - q10
+            
+            # If quantiles suggest wide spread, push score toward extremes
+            if quantile_range > 40:  # High variance expected
+                if base_score > q50:
+                    # Push toward higher scores
+                    spread_score = base_score + (q90 - base_score) * 0.2
+                else:
+                    # Push toward lower scores
+                    spread_score = base_score - (base_score - q10) * 0.2
+            
+            # Use extreme quantiles for boundary adjustment
+            if 'q5' in predictions and base_score < 30:
+                # For low scores, use q5 as guidance
+                spread_score = min(spread_score, predictions['q5'] * 1.1)
+            elif 'q95' in predictions and base_score > 70:
+                # For high scores, use q95 as guidance
+                spread_score = max(spread_score, predictions['q95'] * 0.9)
+        
+        # Calculate model confidence from agreement
         all_preds = list(predictions.values())
         pred_std = np.std(all_preds)
         
-        # Only apply minor adjustments based on model confidence
-        if pred_std > 25:  # High disagreement - models uncertain
-            # Slightly reduce extreme predictions
-            if base_score > 80:
-                return base_score * 0.95
-            elif base_score < 20:
-                return base_score * 1.05
+        # High confidence (low std) -> more aggressive spreading
+        if pred_std < 10:  # Models agree strongly
+            if spread_score > 60:
+                spread_score = spread_score * 1.1  # Push high scores higher
+            elif spread_score < 40:
+                spread_score = spread_score * 0.9  # Push low scores lower
         
-        # Return calibrated score as-is for most cases
-        return base_score
+        # Ensure we're using full range
+        return max(0, min(100, spread_score))
 
 
 def predict_performance_score(transcript: str) -> float:
@@ -1744,42 +2268,181 @@ def predict_performance_score(transcript: str) -> float:
 
 
 def main():
-    """Command line interface."""
+    """Enhanced command line interface for Reddit→TikTok virality prediction."""
     import sys
     import argparse
+    import json
+    import time
     
     # Get project root directory
     script_dir = Path(__file__).parent
     project_root = script_dir.parent
     
-    parser = argparse.ArgumentParser(description="TikTok Performance Predictor")
-    parser.add_argument('command', choices=['train', 'predict'], help='Command to run')
-    # Database connection is configured via config.toml
+    parser = argparse.ArgumentParser(
+        description="TikTok Performance Predictor - Enhanced for Reddit Content",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  Train model with Reddit filtering:
+    python ml/train_ml.py train --filter-reddit
+    
+  Train without filtering (use all data):
+    python ml/train_ml.py train --no-filter
+    
+  Predict score for text:
+    python ml/train_ml.py predict --text "Your Reddit post here"
+    
+  Test with sample Reddit posts:
+    python ml/train_ml.py test
+        """
+    )
+    
+    parser.add_argument('command', choices=['train', 'predict', 'test'], 
+                       help='Command to run')
     parser.add_argument('--model', default=str(script_dir / 'models' / 'snoo.pkl'),
-                       help='Path to model file')
+                       help='Path to model file (default: models/snoo.pkl)')
     parser.add_argument('--text', help='Text to predict (for predict command)')
+    parser.add_argument('--filter-reddit', action='store_true', default=True,
+                       help='Filter training data for Reddit-like content (default: True)')
+    parser.add_argument('--no-filter', dest='filter_reddit', action='store_false',
+                       help='Use all training data without filtering')
+    parser.add_argument('--no-embeddings', action='store_true',
+                       help='Disable sentence embeddings for faster training')
+    parser.add_argument('--save-metrics', action='store_true',
+                       help='Save training metrics to JSON file')
     
     args = parser.parse_args()
     
     if args.command == 'train':
+        print("=" * 80)
+        print("Enhanced TikTok Performance Predictor Training")
+        print("=" * 80)
+        print("\nConfiguration:")
+        print(f"  Model path: {args.model}")
+        print(f"  Reddit filtering: {'Enabled' if args.filter_reddit else 'Disabled'}")
+        print(f"  Sentence embeddings: {'Disabled' if args.no_embeddings else 'Enabled'}")
+        
+        # Disable embeddings if requested
+        if args.no_embeddings:
+            global SENTENCE_TRANSFORMERS_AVAILABLE
+            SENTENCE_TRANSFORMERS_AVAILABLE = False
+            
+        print("\nFeatures enabled:")
+        print("  ✓ Reddit-like content filtering" if args.filter_reddit else "  ✗ Reddit filtering disabled")
+        print("  ✓ Narrative arc detection")
+        print("  ✓ Information density analysis")
+        print("  ✓ Controversy indicators")
+        print("  ✓ Sentence transformer embeddings" if not args.no_embeddings else "  ✗ Embeddings disabled")
+        print("  ✓ Reddit-specific patterns")
+        print("  ✓ Extreme quantile regression (0.05, 0.95)")
+        print("  ✓ Enhanced calibration spreading")
+        print("\n" + "=" * 80)
+        
+        # Initialize and train
         predictor = TikTokPerformancePredictor()
-        metrics = predictor.train()  # Now loads from database
+        print("\nStarting training...")
+        
+        start_time = time.time()
+        metrics = predictor.train(filter_reddit_like=args.filter_reddit)
+        
+        # Save model
+        model_dir = Path(args.model).parent
+        model_dir.mkdir(exist_ok=True)
         predictor.save_model(args.model)
         
-        print("\n=== Training Complete ===")
-        print(f"Samples: {metrics['n_samples']}")
-        print(f"Features: {metrics['n_features']}")
-        print(f"R² Score: {metrics['r2_score']:.3f}")
-        print(f"MAE: {metrics['mae']:.2f}")
-        print(f"Training Time: {metrics['training_time']:.1f}s")
+        print("\n" + "=" * 80)
+        print("Training Complete!")
+        print("=" * 80)
+        print("\nModel Performance:")
+        print(f"  Training samples: {metrics['n_samples']}")
+        print(f"  Features extracted: {metrics['n_features']}")
+        print(f"  R² Score: {metrics['r2_score']:.3f}")
+        print(f"  MAE: {metrics['mae']:.2f}")
+        print(f"  RMSE: {metrics['rmse']:.2f}")
+        print(f"  Prediction range: {metrics['prediction_range']:.1f}")
+        print(f"  Prediction std: {metrics['prediction_std']:.1f}")
+        print(f"  Cross-validation R²: {metrics['cv_mean']:.3f} ± {metrics['cv_std']:.3f}")
+        print(f"  Device used: {metrics['device_used']}")
+        print(f"  Training time: {metrics['training_time']:.1f} seconds")
+        
+        # Save metrics if requested
+        if args.save_metrics:
+            metrics_path = model_dir / "training_metrics.json"
+            with open(metrics_path, 'w') as f:
+                json.dump(metrics, f, indent=2)
+            print(f"\nMetrics saved to: {metrics_path}")
+        
+        print(f"Model saved to: {args.model}")
         
     elif args.command == 'predict':
         if not args.text:
             print("Error: --text argument required for predict command")
             sys.exit(1)
+        
+        # Load and predict
+        try:
+            predictor = TikTokPerformancePredictor()
+            predictor.load_model(args.model)
+            score = predictor.predict_score(args.text)
             
-        score = predict_performance_score(args.text)
-        print(f"Score: {score:.1f}")
+            print(f"\nText: {args.text[:100]}...")
+            print(f"Predicted virality score: {score:.1f}/100")
+            
+            # Provide interpretation
+            if score >= 80:
+                interpretation = "🔥 High viral potential!"
+            elif score >= 60:
+                interpretation = "📈 Good viral potential"
+            elif score >= 40:
+                interpretation = "📊 Moderate potential"
+            elif score >= 20:
+                interpretation = "📉 Low viral potential"
+            else:
+                interpretation = "❄️ Very low viral potential"
+            
+            print(f"Interpretation: {interpretation}")
+            
+        except FileNotFoundError:
+            print(f"Error: Model not found at {args.model}")
+            print("Please train the model first with: python ml/train_ml.py train")
+            sys.exit(1)
+    
+    elif args.command == 'test':
+        print("\nTesting with sample Reddit-style posts...")
+        print("-" * 60)
+        
+        test_posts = [
+            {
+                "type": "AITA",
+                "text": "AITA for not inviting my sister to my wedding? She cheated with my ex-boyfriend 5 years ago and my family thinks I should forgive and forget."
+            },
+            {
+                "type": "TIL",
+                "text": "TIL that honey never spoils. Archaeologists have found 3000 year old honey in Egyptian tombs that was still perfectly edible!"
+            },
+            {
+                "type": "Story",
+                "text": "So yesterday I discovered my cat has been living a double life. Turns out she's been visiting our elderly neighbor every day."
+            },
+            {
+                "type": "Advice",
+                "text": "What should I do? My roommate keeps eating my food and denies it, but I have video proof. How do I confront them?"
+            }
+        ]
+        
+        try:
+            predictor = TikTokPerformancePredictor()
+            predictor.load_model(args.model)
+            
+            for post in test_posts:
+                score = predictor.predict_score(post['text'])
+                print(f"\n[{post['type']}] {post['text'][:60]}...")
+                print(f"Score: {score:.1f}/100")
+                
+        except FileNotFoundError:
+            print(f"Error: Model not found at {args.model}")
+            print("Please train the model first with: python ml/train_ml.py train")
+            sys.exit(1)
 
 
 if __name__ == "__main__":

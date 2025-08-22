@@ -117,3 +117,12 @@ django_user = "postgres"      # Django database user (use "root" on some servers
 django_password = ""          # Django database password (leave empty for no password)
 django_host = "localhost"     # Django database host
 django_port = 5432           # Django database port
+
+[ml]
+# Machine Learning model configuration
+# These settings control how the ML model filters training data
+# to focus on Reddit-like content (text-heavy, narrative videos)
+min_duration = 45            # Minimum video duration in seconds for training data
+min_words = 150              # Minimum words in transcription to include in training
+min_words_per_second = 2.0   # Minimum speaking rate (filters out music/dance videos)
+filter_reddit_like = true    # Enable filtering to focus on Reddit-style content

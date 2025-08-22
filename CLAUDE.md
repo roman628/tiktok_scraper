@@ -294,3 +294,4 @@ The system has been fully migrated to PostgreSQL as the primary storage mechanis
 - The system will error if database connection fails - there's no JSON fallback
 
 **NOTE** comment extraction has been patched indefinitely and there is nothing we can do as of 8/20/2025 to fix it 
+- any new additions to the config.toml should be added to the config.template.toml
