@@ -23,3 +23,7 @@ tests/*.log
 tests/test_config.toml
 config.toml
 master2_*
+
+# I have some documentation in the ml dir
+# that I have for my own use, it isn't important to the code
+ml/*.md
