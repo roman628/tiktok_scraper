@@ -30,23 +30,15 @@ CREATE TABLE IF NOT EXISTS videos (
     timestamp BIGINT,
     width INTEGER,
     height INTEGER,
-    fps INTEGER,
     filesize BIGINT,
     format VARCHAR(50),
     downloaded_at TIMESTAMP WITH TIME ZONE,
     downloaded_with VARCHAR(100),
     platform VARCHAR(50),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    -- New metadata columns
+    last_recalibrated TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    -- Music metadata columns
     track_name TEXT,
-    track_artist TEXT,
-    upload_hour INTEGER CHECK (upload_hour >= 0 AND upload_hour <= 23),
-    upload_minute INTEGER CHECK (upload_minute >= 0 AND upload_minute <= 59),
-    onscreen_text TEXT,
-    has_text_overlay BOOLEAN DEFAULT FALSE,
-    creator_follower_count BIGINT,
-    creator_is_verified BOOLEAN
+    track_artist TEXT
 );
 
 -- Hashtags table (normalized)
@@ -132,17 +124,17 @@ CREATE INDEX IF NOT EXISTS idx_video_hashtags_hashtag_id ON video_hashtags(hasht
 CREATE INDEX IF NOT EXISTS idx_processing_status_video_id ON processing_status(video_id);
 CREATE INDEX IF NOT EXISTS idx_processing_status_ml_processed ON processing_status(ml_processed);
 
--- Create trigger to update updated_at timestamp
-CREATE OR REPLACE FUNCTION update_updated_at_column()
+-- Create trigger to update last_recalibrated timestamp
+CREATE OR REPLACE FUNCTION update_last_recalibrated_column()
 RETURNS TRIGGER AS $$
 BEGIN
-    NEW.updated_at = NOW();
+    NEW.last_recalibrated = NOW();
     RETURN NEW;
 END;
 $$ language 'plpgsql';
 
-CREATE TRIGGER update_videos_updated_at BEFORE UPDATE ON videos
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+CREATE TRIGGER update_videos_last_recalibrated BEFORE UPDATE ON videos
+    FOR EACH ROW EXECUTE FUNCTION update_last_recalibrated_column();
 
 CREATE TRIGGER update_processing_status_updated_at BEFORE UPDATE ON processing_status
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

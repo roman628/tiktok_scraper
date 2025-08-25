@@ -197,14 +197,14 @@ class DatabaseManager:
                 uploader, uploader_id, uploader_url,
                 view_count, like_count, comment_count,
                 repost_count, save_count, share_count,
-                upload_date, timestamp, width, height, fps,
+                upload_date, timestamp, width, height,
                 filesize, format, downloaded_at, downloaded_with, platform
             ) VALUES (
                 %(video_id)s, %(url)s, %(title)s, %(description)s, %(duration)s,
                 %(uploader)s, %(uploader_id)s, %(uploader_url)s,
                 %(view_count)s, %(like_count)s, %(comment_count)s,
                 %(repost_count)s, %(save_count)s, %(share_count)s,
-                %(upload_date)s, %(timestamp)s, %(width)s, %(height)s, %(fps)s,
+                %(upload_date)s, %(timestamp)s, %(width)s, %(height)s,
                 %(filesize)s, %(format)s, %(downloaded_at)s, %(downloaded_with)s, %(platform)s
             ) RETURNING id
         """
@@ -507,14 +507,11 @@ class DatabaseManager:
                     
                     if 'metadata' in components:
                         conditions.append("""
-                            (v.track_name IS NULL OR v.track_artist IS NULL OR 
-                             v.upload_hour IS NULL OR v.creator_follower_count IS NULL)
+                            (v.track_name IS NULL OR v.track_artist IS NULL)
                         """)
                     
-                    if 'ocr' in components:
-                        conditions.append("""
-                            (v.onscreen_text IS NULL AND v.has_text_overlay IS FALSE)
-                        """)
+                    # OCR components removed - no longer supported
+                    # Keep for backwards compatibility but skip
                     
                     if 'hashtags' in components:
                         conditions.append("""
@@ -534,10 +531,6 @@ class DatabaseManager:
                             v.downloaded_at,
                             v.track_name,
                             v.track_artist,
-                            v.upload_hour,
-                            v.creator_follower_count,
-                            v.onscreen_text,
-                            v.has_text_overlay,
                             CASE WHEN t.id IS NOT NULL AND t.whisper_transcription IS NOT NULL 
                                  AND t.whisper_transcription != '' THEN true ELSE false END as has_transcription,
                             COALESCE(ps.comments_extracted, false) as has_comments,
@@ -590,16 +583,9 @@ class DatabaseManager:
                     field_map = {
                         'track_name': 'track_name',
                         'track_artist': 'track_artist',
-                        'upload_hour': 'upload_hour',
-                        'upload_minute': 'upload_minute',
-                        'creator_follower_count': 'creator_follower_count',
-                        'creator_is_verified': 'creator_is_verified',
-                        'onscreen_text': 'onscreen_text',
-                        'has_text_overlay': 'has_text_overlay',
                         'duration': 'duration',
                         'width': 'width',
-                        'height': 'height',
-                        'fps': 'fps'
+                        'height': 'height'
                     }
                     
                     for key, column in field_map.items():
@@ -610,8 +596,8 @@ class DatabaseManager:
                     if not update_fields:
                         return True  # Nothing to update
                     
-                    # Add updated_at timestamp
-                    update_fields.append("updated_at = CURRENT_TIMESTAMP")
+                    # Add last_recalibrated timestamp
+                    update_fields.append("last_recalibrated = CURRENT_TIMESTAMP")
                     
                     # Add video_id to values for WHERE clause
                     values.append(video_id)
@@ -701,7 +687,6 @@ class DatabaseManager:
                 'timestamp': video['timestamp'],
                 'width': video['width'],
                 'height': video['height'],
-                'fps': video['fps'],
                 'filesize': video['filesize'],
                 'format': video['format'],
                 'downloaded_at': video['downloaded_at'].isoformat() if video['downloaded_at'] else None,

@@ -45,14 +45,7 @@ class Recalibrator:
             db_check_field='has_complete_metadata',
             process_method='update_metadata',
             requires=[],
-            description='Video metadata (track info, upload time, creator stats)'
-        ),
-        'ocr': Component(
-            name='ocr',
-            db_check_field='has_ocr_text',
-            process_method='extract_ocr_text',
-            requires=['ocr_enabled'],
-            description='On-screen text extraction from video frames'
+            description='Video metadata (track info, music metadata)'
         ),
         'hashtags': Component(
             name='hashtags',
@@ -90,9 +83,7 @@ class Recalibrator:
         if data_collection.get('comments', False) and self.config.get('tiktok', {}).get('ms_token'):
             available.add('comments')
         
-        # Check for OCR
-        if data_collection.get('ocr_text', False):
-            available.add('ocr')
+        # OCR removed - no longer supported
         
         # Check for hashtags
         if data_collection.get('hashtags', False):
@@ -161,12 +152,7 @@ class Recalibrator:
                 elif comp_name == 'metadata':
                     # Check for any missing metadata fields
                     if (video.get('track_name') is None or 
-                        video.get('track_artist') is None or 
-                        video.get('upload_hour') is None or
-                        video.get('creator_follower_count') is None):
-                        video['missing_components'].append(comp_name)
-                elif comp_name == 'ocr':
-                    if not video.get('onscreen_text') and not video.get('has_text_overlay'):
+                        video.get('track_artist') is None):
                         video['missing_components'].append(comp_name)
                 elif comp_name == 'hashtags':
                     if not video.get('has_hashtags'):
@@ -202,8 +188,6 @@ class Recalibrator:
             batch['extract_comments'] = True
         if 'metadata' in components:
             batch['update_metadata'] = True
-        if 'ocr' in components:
-            batch['extract_ocr'] = True
         if 'hashtags' in components:
             batch['extract_hashtags'] = True
         

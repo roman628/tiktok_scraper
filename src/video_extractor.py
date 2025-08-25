@@ -182,15 +182,8 @@ class VideoExtractor:
             with yt_dlp.YoutubeDL(temp_ydl_opts) as ydl:
                 info_dict = ydl.extract_info(url, download=False)
                 
-                # Extract upload hour/minute from timestamp if available
+                # Get upload timestamp
                 timestamp = info_dict.get('timestamp', 0)
-                upload_hour = None
-                upload_minute = None
-                if timestamp:
-                    from datetime import datetime
-                    dt = datetime.fromtimestamp(timestamp)
-                    upload_hour = dt.hour
-                    upload_minute = dt.minute
                 
                 metadata = {
                     "title": info_dict.get('title', 'Unknown'),
@@ -208,11 +201,8 @@ class VideoExtractor:
                     "hashtags": info_dict.get('tags', []),
                     "upload_date": info_dict.get('upload_date', ''),
                     "timestamp": timestamp,
-                    "upload_hour": upload_hour,
-                    "upload_minute": upload_minute,
                     "width": info_dict.get('width', 0),
                     "height": info_dict.get('height', 0),
-                    "fps": info_dict.get('fps', 0),
                     "filesize": info_dict.get('filesize', 0),
                     "format": info_dict.get('format', ''),
                     "track_name": info_dict.get('track', None),

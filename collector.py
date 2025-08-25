@@ -752,7 +752,6 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
             'timestamp': metadata.get('timestamp', 0),
             'width': metadata.get('width', 0),
             'height': metadata.get('height', 0),
-            'fps': metadata.get('fps', 0),
             'filesize': metadata.get('filesize', 0),
             'format': metadata.get('format', ''),
             'downloaded_at': metadata.get('downloaded_at', ''),
@@ -800,22 +799,8 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
                     'track_artist': metadata.get('track_artist'),
                     'duration': metadata.get('duration'),
                     'width': metadata.get('width'),
-                    'height': metadata.get('height'),
-                    'fps': metadata.get('fps')
+                    'height': metadata.get('height')
                 }
-                
-                # Extract upload hour/minute from timestamp if available
-                if metadata.get('timestamp'):
-                    from datetime import datetime
-                    dt = datetime.fromtimestamp(metadata['timestamp'])
-                    metadata_fields['upload_hour'] = dt.hour
-                    metadata_fields['upload_minute'] = dt.minute
-                
-                # Add creator stats if available
-                if metadata.get('creator_follower_count'):
-                    metadata_fields['creator_follower_count'] = metadata['creator_follower_count']
-                if 'creator_is_verified' in metadata:
-                    metadata_fields['creator_is_verified'] = metadata['creator_is_verified']
                 
                 # Update metadata in database
                 success = data_manager.manager.update_video_metadata(
@@ -867,27 +852,7 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
                     progress.send_log(f"Hashtag extraction failed: {e}", 'warning')
                     success = False
             
-            # Extract OCR text if requested
-            if 'ocr' in recalibrate_components and video_result and video_result.get('file_path'):
-                try:
-                    from src.text_extractor import get_text_extractor
-                    extractor = get_text_extractor()
-                    text, has_text = extractor.extract_text_quick(video_result['file_path'])
-                    
-                    if text or has_text:
-                        # Update database with OCR results
-                        with data_manager.manager.get_connection() as conn:
-                            with conn.cursor() as cursor:
-                                cursor.execute("""
-                                    UPDATE videos 
-                                    SET onscreen_text = %s, has_text_overlay = %s 
-                                    WHERE id = %s
-                                """, (text, has_text, existing_video['id']))
-                                conn.commit()
-                                progress.send_log(f"Extracted OCR text: {len(text) if text else 0} chars", 'info')
-                except Exception as e:
-                    progress.send_log(f"OCR extraction failed: {e}", 'warning')
-                    success = False
+            # OCR extraction removed - no longer supported
             
             if not success:
                 return {'success': False, 'error': 'Failed to update some components'}
@@ -920,27 +885,7 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
             except Exception as e:
                 progress.send_log(f"Hashtag extraction failed: {e}", 'warning')
         
-        # Extract OCR text if enabled and video was downloaded
-        if data_collection_config.get('ocr_text', True) and video_result and video_result.get('file_path'):
-            try:
-                from src.text_extractor import get_text_extractor
-                extractor = get_text_extractor()
-                text, has_text = extractor.extract_text_quick(video_result['file_path'])
-                
-                if text or has_text:
-                    # Update database with OCR results
-                    if hasattr(data_manager, 'conn') and result and isinstance(result, dict) and 'id' in result:
-                        cursor = data_manager.conn.cursor()
-                        cursor.execute("""
-                            UPDATE videos 
-                            SET onscreen_text = %s, has_text_overlay = %s 
-                            WHERE id = %s
-                        """, (text, has_text, result['id']))
-                        data_manager.conn.commit()
-                        cursor.close()
-                        progress.send_log(f"Extracted OCR text: {len(text)} chars", 'info')
-            except Exception as e:
-                progress.send_log(f"OCR extraction failed: {e}", 'warning')
+        # OCR extraction removed - no longer supported
         
         progress.complete_saving()
         
