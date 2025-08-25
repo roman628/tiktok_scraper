@@ -483,7 +483,7 @@ class DatabaseManager:
         Get videos with missing data components.
         
         Args:
-            components: List of component names ('transcripts', 'comments', 'metadata')
+            components: List of component names ('transcripts', 'comments', 'metadata', 'ocr', 'hashtags')
             limit: Maximum number of videos to return
             
         Returns:
@@ -507,7 +507,18 @@ class DatabaseManager:
                     
                     if 'metadata' in components:
                         conditions.append("""
-                            (v.duration IS NULL OR v.width IS NULL OR v.height IS NULL)
+                            (v.track_name IS NULL OR v.track_artist IS NULL OR 
+                             v.upload_hour IS NULL OR v.creator_follower_count IS NULL)
+                        """)
+                    
+                    if 'ocr' in components:
+                        conditions.append("""
+                            (v.onscreen_text IS NULL AND v.has_text_overlay IS FALSE)
+                        """)
+                    
+                    if 'hashtags' in components:
+                        conditions.append("""
+                            v.id NOT IN (SELECT DISTINCT video_id FROM video_hashtags)
                         """)
                     
                     if not conditions:
@@ -519,12 +530,19 @@ class DatabaseManager:
                             v.video_id,
                             v.url,
                             v.title,
+                            v.description,
                             v.downloaded_at,
+                            v.track_name,
+                            v.track_artist,
+                            v.upload_hour,
+                            v.creator_follower_count,
+                            v.onscreen_text,
+                            v.has_text_overlay,
                             CASE WHEN t.id IS NOT NULL AND t.whisper_transcription IS NOT NULL 
                                  AND t.whisper_transcription != '' THEN true ELSE false END as has_transcription,
                             COALESCE(ps.comments_extracted, false) as has_comments,
-                            CASE WHEN v.duration IS NOT NULL AND v.width IS NOT NULL 
-                                 AND v.height IS NOT NULL THEN true ELSE false END as has_complete_metadata
+                            CASE WHEN v.id IN (SELECT video_id FROM video_hashtags) 
+                                 THEN true ELSE false END as has_hashtags
                         FROM videos v
                         LEFT JOIN transcriptions t ON v.id = t.video_id
                         LEFT JOIN processing_status ps ON v.id = ps.video_id
@@ -548,6 +566,70 @@ class DatabaseManager:
         except psycopg2.Error as e:
             logger.error(f"Failed to get incomplete videos: {e}")
             return []
+    
+    @retry_on_connection_error()
+    def update_video_metadata(self, video_id: str, metadata: Dict[str, Any]) -> bool:
+        """
+        Update metadata fields for an existing video.
+        
+        Args:
+            video_id: TikTok video ID (string)
+            metadata: Dict with metadata fields to update
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    # Build update query dynamically based on provided fields
+                    update_fields = []
+                    values = []
+                    
+                    # Map of metadata keys to database columns
+                    field_map = {
+                        'track_name': 'track_name',
+                        'track_artist': 'track_artist',
+                        'upload_hour': 'upload_hour',
+                        'upload_minute': 'upload_minute',
+                        'creator_follower_count': 'creator_follower_count',
+                        'creator_is_verified': 'creator_is_verified',
+                        'onscreen_text': 'onscreen_text',
+                        'has_text_overlay': 'has_text_overlay',
+                        'duration': 'duration',
+                        'width': 'width',
+                        'height': 'height',
+                        'fps': 'fps'
+                    }
+                    
+                    for key, column in field_map.items():
+                        if key in metadata:
+                            update_fields.append(f"{column} = %s")
+                            values.append(metadata[key])
+                    
+                    if not update_fields:
+                        return True  # Nothing to update
+                    
+                    # Add updated_at timestamp
+                    update_fields.append("updated_at = CURRENT_TIMESTAMP")
+                    
+                    # Add video_id to values for WHERE clause
+                    values.append(video_id)
+                    
+                    query = f"""
+                        UPDATE videos 
+                        SET {', '.join(update_fields)}
+                        WHERE video_id = %s
+                    """
+                    
+                    cursor.execute(query, values)
+                    conn.commit()
+                    
+                    return cursor.rowcount > 0
+                    
+        except psycopg2.Error as e:
+            logger.error(f"Failed to update video metadata: {e}")
+            return False
     
     @retry_on_connection_error()
     def add_comments(self, video_id: int, comments: List[Dict]):

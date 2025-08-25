@@ -37,7 +37,16 @@ CREATE TABLE IF NOT EXISTS videos (
     downloaded_with VARCHAR(100),
     platform VARCHAR(50),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    -- New metadata columns
+    track_name TEXT,
+    track_artist TEXT,
+    upload_hour INTEGER CHECK (upload_hour >= 0 AND upload_hour <= 23),
+    upload_minute INTEGER CHECK (upload_minute >= 0 AND upload_minute <= 59),
+    onscreen_text TEXT,
+    has_text_overlay BOOLEAN DEFAULT FALSE,
+    creator_follower_count BIGINT,
+    creator_is_verified BOOLEAN
 );
 
 -- Hashtags table (normalized)
@@ -106,6 +115,10 @@ CREATE INDEX IF NOT EXISTS idx_videos_video_id ON videos(video_id);
 CREATE INDEX IF NOT EXISTS idx_videos_downloaded_at ON videos(downloaded_at);
 CREATE INDEX IF NOT EXISTS idx_videos_uploader_id ON videos(uploader_id);
 CREATE INDEX IF NOT EXISTS idx_videos_upload_date ON videos(upload_date);
+CREATE INDEX IF NOT EXISTS idx_videos_track_name ON videos(track_name);
+CREATE INDEX IF NOT EXISTS idx_videos_track_artist ON videos(track_artist);
+CREATE INDEX IF NOT EXISTS idx_videos_upload_hour ON videos(upload_hour);
+CREATE INDEX IF NOT EXISTS idx_videos_has_text_overlay ON videos(has_text_overlay);
 
 CREATE INDEX IF NOT EXISTS idx_comments_video_id ON comments(video_id);
 CREATE INDEX IF NOT EXISTS idx_comments_username ON comments(username);

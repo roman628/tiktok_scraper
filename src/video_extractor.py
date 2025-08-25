@@ -39,7 +39,8 @@ class VideoExtractor:
     def download_single_video(self, url: str, audio_only: bool = False, 
                             use_whisper: bool = False, whisper_model: Any = None,
                             whisper_device: str = "CPU", 
-                            shutdown_event=None, progress_callback=None) -> Dict[str, Any]:
+                            shutdown_event=None, progress_callback=None,
+                            metadata_only: bool = False) -> Dict[str, Any]:
         """Download a single TikTok video with metadata.
         
         Args:
@@ -49,6 +50,7 @@ class VideoExtractor:
             whisper_model: Pre-loaded Whisper model
             whisper_device: Device for Whisper
             shutdown_event: Event to check for shutdown requests
+            metadata_only: Only extract metadata, don't download video
             
         Returns:
             Dictionary with success status and metadata
@@ -82,6 +84,19 @@ class VideoExtractor:
             if progress_callback:
                 progress_callback.send_progress('downloading', 30)
                 progress_callback.send_log("Metadata extracted successfully", 'success')
+            
+            # If metadata_only, return early without downloading
+            if metadata_only:
+                if progress_callback:
+                    progress_callback.send_progress('downloading', 100)
+                    progress_callback.send_log("Metadata-only extraction completed", 'success')
+                
+                return {
+                    'success': True,
+                    'metadata': metadata,
+                    'file_path': None,
+                    'url': url
+                }
             
             # Check shutdown before download
             if shutdown_event and shutdown_event.is_set():
@@ -167,6 +182,16 @@ class VideoExtractor:
             with yt_dlp.YoutubeDL(temp_ydl_opts) as ydl:
                 info_dict = ydl.extract_info(url, download=False)
                 
+                # Extract upload hour/minute from timestamp if available
+                timestamp = info_dict.get('timestamp', 0)
+                upload_hour = None
+                upload_minute = None
+                if timestamp:
+                    from datetime import datetime
+                    dt = datetime.fromtimestamp(timestamp)
+                    upload_hour = dt.hour
+                    upload_minute = dt.minute
+                
                 metadata = {
                     "title": info_dict.get('title', 'Unknown'),
                     "description": info_dict.get('description', ''),
@@ -182,12 +207,16 @@ class VideoExtractor:
                     "repost_count": info_dict.get('repost_count', 0),
                     "hashtags": info_dict.get('tags', []),
                     "upload_date": info_dict.get('upload_date', ''),
-                    "timestamp": info_dict.get('timestamp', 0),
+                    "timestamp": timestamp,
+                    "upload_hour": upload_hour,
+                    "upload_minute": upload_minute,
                     "width": info_dict.get('width', 0),
                     "height": info_dict.get('height', 0),
                     "fps": info_dict.get('fps', 0),
                     "filesize": info_dict.get('filesize', 0),
                     "format": info_dict.get('format', ''),
+                    "track_name": info_dict.get('track', None),
+                    "track_artist": info_dict.get('artist', None),
                     "downloaded_at": datetime.now().isoformat(),
                     "downloaded_with": f"Robust TikTok Scraper v3.0 ({platform.system()})",
                     "platform": platform.system()

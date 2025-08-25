@@ -45,7 +45,21 @@ class Recalibrator:
             db_check_field='has_complete_metadata',
             process_method='update_metadata',
             requires=[],
-            description='Video duration, dimensions, etc.'
+            description='Video metadata (track info, upload time, creator stats)'
+        ),
+        'ocr': Component(
+            name='ocr',
+            db_check_field='has_ocr_text',
+            process_method='extract_ocr_text',
+            requires=['ocr_enabled'],
+            description='On-screen text extraction from video frames'
+        ),
+        'hashtags': Component(
+            name='hashtags',
+            db_check_field='has_hashtags',
+            process_method='extract_hashtags',
+            requires=['hashtags_enabled'],
+            description='Hashtag extraction from titles/descriptions'
         ),
         # Future components can be added here:
         # 'thumbnails': Component(...),
@@ -65,13 +79,24 @@ class Recalibrator:
         # Always available
         available.add('metadata')
         
-        # Check for whisper
-        if self.config.get('download', {}).get('use_whisper', False):
+        # Check data_collection config
+        data_collection = self.config.get('data_collection', {})
+        
+        # Check for transcription
+        if data_collection.get('transcription', False) or self.config.get('download', {}).get('use_whisper', False):
             available.add('transcripts')
         
-        # Check for MS_TOKEN
-        if self.config.get('tiktok', {}).get('ms_token'):
+        # Check for comments (requires MS_TOKEN)
+        if data_collection.get('comments', False) and self.config.get('tiktok', {}).get('ms_token'):
             available.add('comments')
+        
+        # Check for OCR
+        if data_collection.get('ocr_text', False):
+            available.add('ocr')
+        
+        # Check for hashtags
+        if data_collection.get('hashtags', False):
+            available.add('hashtags')
         
         return available
     
@@ -134,7 +159,17 @@ class Recalibrator:
                     if not video.get('has_comments'):
                         video['missing_components'].append(comp_name)
                 elif comp_name == 'metadata':
-                    if not video.get('has_complete_metadata'):
+                    # Check for any missing metadata fields
+                    if (video.get('track_name') is None or 
+                        video.get('track_artist') is None or 
+                        video.get('upload_hour') is None or
+                        video.get('creator_follower_count') is None):
+                        video['missing_components'].append(comp_name)
+                elif comp_name == 'ocr':
+                    if not video.get('onscreen_text') and not video.get('has_text_overlay'):
+                        video['missing_components'].append(comp_name)
+                elif comp_name == 'hashtags':
+                    if not video.get('has_hashtags'):
                         video['missing_components'].append(comp_name)
         
         # Filter to only videos with missing components
@@ -167,6 +202,10 @@ class Recalibrator:
             batch['extract_comments'] = True
         if 'metadata' in components:
             batch['update_metadata'] = True
+        if 'ocr' in components:
+            batch['extract_ocr'] = True
+        if 'hashtags' in components:
+            batch['extract_hashtags'] = True
         
         return batch
     

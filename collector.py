@@ -595,78 +595,119 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
         return {'success': False, 'error': 'Shutdown requested'}
     
     try:
-        # In recalibrate mode, check if we need to download or just transcribe
-        if recalibrate_mode and 'transcripts' in recalibrate_components:
-            # Try to find existing video file for this URL
-            import glob
+        # In recalibrate mode, handle different component types
+        if recalibrate_mode:
+            # For metadata-only recalibration, we don't need to download the video
+            if 'metadata' in recalibrate_components and 'transcripts' not in recalibrate_components:
+                progress.send_log("Fetching metadata only (no download needed)", 'info')
+                # Will be handled by video_extractor with metadata_only flag
             
-            # Extract video ID from URL
-            # Import moved to top of file to avoid repeated imports
-            url_proc = URLProcessor()
-            video_id = url_proc.extract_video_id(url)
+            # For OCR recalibration, check for existing video files
+            elif 'ocr' in recalibrate_components:
+                import glob
+                url_proc = URLProcessor()
+                video_id = url_proc.extract_video_id(url)
+                video_files = glob.glob(f"{args.output}/*{video_id}*")
+                
+                if video_files:
+                    progress.send_log(f"Found existing file for OCR: {video_files[0]}", 'info')
+                else:
+                    progress.send_log("No local file found, will download for OCR extraction", 'info')
             
-            # Look for existing video file in configured output directory
-            video_files = glob.glob(f"{args.output}/*{video_id}*")
-            
-            if video_files:
-                # File exists, just transcribe it
-                progress.send_log(f"Found existing file: {video_files[0]}", 'info')
-                # We'll call download_single_video which should detect the existing file
-            else:
-                # No local file, need to download it first
-                progress.send_log("No local file found, downloading video first", 'info')
-                # The download_single_video call below will handle downloading
+            # For transcript recalibration
+            elif 'transcripts' in recalibrate_components:
+                # Try to find existing video file for this URL
+                import glob
+                
+                # Extract video ID from URL
+                # Import moved to top of file to avoid repeated imports
+                url_proc = URLProcessor()
+                video_id = url_proc.extract_video_id(url)
+                
+                # Look for existing video file in configured output directory
+                video_files = glob.glob(f"{args.output}/*{video_id}*")
+                
+                if video_files:
+                    # File exists, just transcribe it
+                    progress.send_log(f"Found existing file: {video_files[0]}", 'info')
+                    # We'll call download_single_video which should detect the existing file
+                else:
+                    # No local file, need to download it first
+                    progress.send_log("No local file found, downloading video first", 'info')
+                    # The download_single_video call below will handle downloading
         
-        # Download video (or use existing in recalibrate mode)
-        progress.start_download()
-        
-        # Setup whisper model if needed - check if transcription is enabled
-        whisper_model = None
-        use_whisper = 'transcription' in enabled_collectors and download_kwargs.get('use_whisper', False)
-        
-        # Force whisper for transcript recalibration
-        if recalibrate_mode and 'transcripts' in recalibrate_components:
-            use_whisper = True
-            args.whisper = True
-        
-        if args.whisper and whisper_config and use_whisper:
-            whisper_model = whisper_config.get('model')
-        
-        video_result = video_extractor.download_single_video(
-            url,
-            audio_only=download_kwargs.get('audio_only', False),
-            use_whisper=use_whisper,
-            whisper_model=whisper_model,
-            whisper_device=whisper_config.get('device', 'CPU').upper() if whisper_config else 'CPU',
-            shutdown_event=shutdown_event,
-            progress_callback=progress
-            # In recalibrate mode, it will download if file doesn't exist, or use existing if it does
-        )
-        
-        progress.send_progress('downloading', 100)
-        
-        if not video_result['success']:
-            error_msg = video_result.get('error', 'Download failed')
-            progress.report_error('download', error_msg)
-            
-            # Handle deleted videos
-            if video_result.get('deleted'):
-                return {'success': False, 'error': error_msg, 'deleted': True}
-            return {'success': False, 'error': error_msg}
-        
-        metadata = video_result['metadata']
-        
-        # Extract metadata
-        progress.start_metadata_extraction()
-        progress.send_log("Processing metadata...", 'progress')
-        if 'likes' in metadata:
-            progress.complete_metadata(
-                metadata.get('likes', 0),
-                metadata.get('comment_count', 0)
-            )
+        # For hashtag-only recalibration, skip video download entirely
+        if recalibrate_mode and recalibrate_components == ['hashtags']:
+            # No need to download anything for hashtag extraction
+            video_result = {'success': True, 'metadata': {}, 'file_path': None}
+            metadata = {}
+            progress.send_log("Skipping download for hashtag-only recalibration", 'info')
         else:
-            progress.send_progress('metadata', 100)
-            progress.send_log("Metadata extracted", 'success')
+            # Download video (or use existing in recalibrate mode)
+            progress.start_download()
+            
+            # Setup whisper model if needed - check if transcription is enabled
+            whisper_model = None
+            use_whisper = 'transcription' in enabled_collectors and download_kwargs.get('use_whisper', False)
+            
+            # Force whisper for transcript recalibration
+            if recalibrate_mode and 'transcripts' in recalibrate_components:
+                use_whisper = True
+                args.whisper = True
+            
+            if args.whisper and whisper_config and use_whisper:
+                whisper_model = whisper_config.get('model')
+            
+            # Check if we only need metadata (no video download)
+            metadata_only = recalibrate_mode and 'metadata' in recalibrate_components and \
+                           'transcripts' not in recalibrate_components and \
+                           'ocr' not in recalibrate_components
+            
+            video_result = video_extractor.download_single_video(
+                url,
+                audio_only=download_kwargs.get('audio_only', False),
+                use_whisper=use_whisper,
+                whisper_model=whisper_model,
+                whisper_device=whisper_config.get('device', 'CPU').upper() if whisper_config else 'CPU',
+                shutdown_event=shutdown_event,
+                progress_callback=progress,
+                metadata_only=metadata_only  # Add metadata_only flag
+                # In recalibrate mode, it will download if file doesn't exist, or use existing if it does
+            )
+            
+            metadata = video_result.get('metadata', {})
+        
+        # Skip metadata handling for hashtag-only recalibration
+        if recalibrate_mode and recalibrate_components == ['hashtags']:
+            # For hashtag-only, jump directly to database operations
+            metadata = {}
+            video_data = {}
+        else:
+            progress.send_progress('downloading', 100)
+            
+            if not video_result['success']:
+                error_msg = video_result.get('error', 'Download failed')
+                progress.report_error('download', error_msg)
+                
+                # Handle deleted videos
+                if video_result.get('deleted'):
+                    return {'success': False, 'error': error_msg, 'deleted': True}
+                return {'success': False, 'error': error_msg}
+            
+            metadata = video_result['metadata']
+        
+        # Extract metadata (skip for hashtag-only recalibration)
+        if not (recalibrate_mode and recalibrate_components == ['hashtags']):
+            progress.start_metadata_extraction()
+            progress.send_log("Processing metadata...", 'progress')
+            if 'likes' in metadata:
+                progress.complete_metadata(
+                    metadata.get('likes', 0),
+                    metadata.get('comment_count', 0)
+                )
+            else:
+                progress.send_progress('metadata', 100)
+                progress.send_log("Metadata extracted", 'success')
         
         # Handle transcription
         transcript = metadata.get('whisper_transcription', '')
@@ -689,8 +730,9 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
             except Exception as e:
                 progress.report_error('comments', str(e))
         
-        # Create FLATTENED data structure (matching single worker output)
-        video_data = {
+        # Create FLATTENED data structure (skip for hashtag-only recalibration)
+        if not (recalibrate_mode and recalibrate_components == ['hashtags']):
+            video_data = {
             'title': metadata.get('title', ''),
             'description': metadata.get('description', ''),
             'duration': metadata.get('duration', 0),
@@ -717,24 +759,138 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
             'downloaded_with': metadata.get('downloaded_with', ''),
             'platform': metadata.get('platform', ''),
             'whisper_transcription': transcript,
-            'transcription_timestamp': metadata.get('transcription_timestamp', ''),
-            'top_comments': comments,
-            'comments_extracted': len(comments) > 0,
-            'comments_extracted_at': datetime.now().isoformat() if comments else ''
-        }
+                'transcription_timestamp': metadata.get('transcription_timestamp', ''),
+                'top_comments': comments,
+                'comments_extracted': len(comments) > 0,
+                'comments_extracted_at': datetime.now().isoformat() if comments else ''
+            }
         
         # Save to master file
         progress.start_saving()
         
         # In recalibrate mode, update existing video; otherwise insert new
         if recalibrate_mode:
-            # Update existing video components
-            success = data_manager.update_video_components(video_data)
-            if success:
-                progress.send_log("Updated video components in database", 'success')
-            else:
-                progress.send_log("Failed to update video components", 'error')
-                return {'success': False, 'error': 'Failed to update database'}
+            # Get existing video ID from database for updates
+            existing_video = None
+            if hasattr(data_manager, 'manager') and hasattr(data_manager.manager, 'get_connection'):
+                try:
+                    with data_manager.manager.get_connection() as conn:
+                        with conn.cursor() as cursor:
+                            cursor.execute(
+                                "SELECT id, video_id FROM videos WHERE url = %s",
+                                (url,)
+                            )
+                            row = cursor.fetchone()
+                            if row:
+                                existing_video = {'id': row[0], 'video_id': row[1]}
+                except Exception as e:
+                    progress.send_log(f"Failed to find existing video: {e}", 'error')
+            
+            if not existing_video:
+                progress.send_log("Video not found in database for recalibration", 'error')
+                return {'success': False, 'error': 'Video not found for recalibration'}
+            
+            # Handle different recalibration components
+            success = True
+            
+            # Update metadata if requested
+            if 'metadata' in recalibrate_components:
+                metadata_fields = {
+                    'track_name': metadata.get('track_name'),
+                    'track_artist': metadata.get('track_artist'),
+                    'duration': metadata.get('duration'),
+                    'width': metadata.get('width'),
+                    'height': metadata.get('height'),
+                    'fps': metadata.get('fps')
+                }
+                
+                # Extract upload hour/minute from timestamp if available
+                if metadata.get('timestamp'):
+                    from datetime import datetime
+                    dt = datetime.fromtimestamp(metadata['timestamp'])
+                    metadata_fields['upload_hour'] = dt.hour
+                    metadata_fields['upload_minute'] = dt.minute
+                
+                # Add creator stats if available
+                if metadata.get('creator_follower_count'):
+                    metadata_fields['creator_follower_count'] = metadata['creator_follower_count']
+                if 'creator_is_verified' in metadata:
+                    metadata_fields['creator_is_verified'] = metadata['creator_is_verified']
+                
+                # Update metadata in database
+                success = data_manager.manager.update_video_metadata(
+                    existing_video['video_id'], 
+                    metadata_fields
+                )
+                if success:
+                    progress.send_log("Updated video metadata", 'success')
+                else:
+                    progress.send_log("Failed to update metadata", 'error')
+            
+            # Update transcription if requested and available
+            if 'transcripts' in recalibrate_components and metadata.get('whisper_transcription'):
+                # Update transcription (handled by existing logic)
+                success = data_manager.update_video_components(video_data)
+                if success:
+                    progress.send_log("Updated transcription", 'success')
+                else:
+                    progress.send_log("Failed to update transcription", 'error')
+            
+            # Extract hashtags if requested
+            if 'hashtags' in recalibrate_components:
+                try:
+                    from database.extract_hashtags import extract_and_save_hashtags_for_video
+                    from psycopg2.extras import RealDictCursor
+                    with data_manager.manager.get_connection() as conn:
+                        # Use RealDictCursor as expected by extract_hashtags function
+                        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                            # Get title and description from database, not from video_data
+                            cursor.execute(
+                                "SELECT title, description FROM videos WHERE id = %s",
+                                (existing_video['id'],)
+                            )
+                            video_info = cursor.fetchone()
+                            if video_info:
+                                hashtags = extract_and_save_hashtags_for_video(
+                                    cursor,
+                                    existing_video['id'],
+                                    video_info['title'],
+                                    video_info['description']
+                                )
+                                conn.commit()
+                                if hashtags:
+                                    progress.send_log(f"Extracted {len(hashtags)} hashtags", 'info')
+                            else:
+                                progress.send_log(f"Video not found in database", 'warning')
+                                success = False
+                except Exception as e:
+                    progress.send_log(f"Hashtag extraction failed: {e}", 'warning')
+                    success = False
+            
+            # Extract OCR text if requested
+            if 'ocr' in recalibrate_components and video_result and video_result.get('file_path'):
+                try:
+                    from src.text_extractor import get_text_extractor
+                    extractor = get_text_extractor()
+                    text, has_text = extractor.extract_text_quick(video_result['file_path'])
+                    
+                    if text or has_text:
+                        # Update database with OCR results
+                        with data_manager.manager.get_connection() as conn:
+                            with conn.cursor() as cursor:
+                                cursor.execute("""
+                                    UPDATE videos 
+                                    SET onscreen_text = %s, has_text_overlay = %s 
+                                    WHERE id = %s
+                                """, (text, has_text, existing_video['id']))
+                                conn.commit()
+                                progress.send_log(f"Extracted OCR text: {len(text) if text else 0} chars", 'info')
+                except Exception as e:
+                    progress.send_log(f"OCR extraction failed: {e}", 'warning')
+                    success = False
+            
+            if not success:
+                return {'success': False, 'error': 'Failed to update some components'}
         else:
             # Normal mode - insert new video
             result = data_manager.append_to_master(video_data)
@@ -745,6 +901,46 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
         # Update cache for duplicate detection
         if hasattr(data_manager, 'existing_urls'):
             data_manager.existing_urls.add(url)
+        
+        # Extract hashtags if enabled and we have a database connection
+        if data_collection_config.get('hashtags', True) and hasattr(data_manager, 'conn'):
+            try:
+                from database.extract_hashtags import extract_and_save_hashtags_for_video
+                # Get the video_id we just inserted
+                if result and isinstance(result, dict) and 'id' in result:
+                    video_id = result['id']
+                    hashtags = extract_and_save_hashtags_for_video(
+                        data_manager.conn.cursor(),
+                        video_id,
+                        video_data.get('title', ''),
+                        video_data.get('description', '')
+                    )
+                    if hashtags:
+                        progress.send_log(f"Extracted {len(hashtags)} hashtags", 'info')
+            except Exception as e:
+                progress.send_log(f"Hashtag extraction failed: {e}", 'warning')
+        
+        # Extract OCR text if enabled and video was downloaded
+        if data_collection_config.get('ocr_text', True) and video_result and video_result.get('file_path'):
+            try:
+                from src.text_extractor import get_text_extractor
+                extractor = get_text_extractor()
+                text, has_text = extractor.extract_text_quick(video_result['file_path'])
+                
+                if text or has_text:
+                    # Update database with OCR results
+                    if hasattr(data_manager, 'conn') and result and isinstance(result, dict) and 'id' in result:
+                        cursor = data_manager.conn.cursor()
+                        cursor.execute("""
+                            UPDATE videos 
+                            SET onscreen_text = %s, has_text_overlay = %s 
+                            WHERE id = %s
+                        """, (text, has_text, result['id']))
+                        data_manager.conn.commit()
+                        cursor.close()
+                        progress.send_log(f"Extracted OCR text: {len(text)} chars", 'info')
+            except Exception as e:
+                progress.send_log(f"OCR extraction failed: {e}", 'warning')
         
         progress.complete_saving()
         
@@ -968,7 +1164,7 @@ def get_cli_provided_args() -> set:
     return provided
 
 def load_config(config_path: str = "config.toml") -> Dict[str, Any]:
-    """Load configuration from TOML file."""
+    """Load configuration from TOML file and auto-update with missing settings from template."""
     config = {}
     if os.path.exists(config_path):
         try:
@@ -977,6 +1173,47 @@ def load_config(config_path: str = "config.toml") -> Dict[str, Any]:
             print(f"✓ Loaded configuration from {config_path}")
         except Exception as e:
             print(f"Warning: Could not load {config_path}: {e}")
+    
+    # Auto-update config with missing settings from template
+    template_path = "assets/config.template.toml"
+    if os.path.exists(template_path) and os.path.exists(config_path):
+        try:
+            with open(template_path, 'rb') as f:
+                template_config = tomllib.load(f)
+            
+            # Find missing settings
+            missing_sections = []
+            for section, section_values in template_config.items():
+                if section not in config:
+                    config[section] = section_values
+                    missing_sections.append(section)
+                elif isinstance(section_values, dict):
+                    # Check for missing keys within section
+                    for key, value in section_values.items():
+                        if key not in config[section]:
+                            config[section][key] = value
+                            missing_sections.append(f"{section}.{key}")
+            
+            # If there were missing settings, update the config file
+            if missing_sections:
+                print(f"⚠️  Warning: Found missing config settings, adding defaults for: {', '.join(missing_sections[:5])}")
+                if len(missing_sections) > 5:
+                    print(f"   ... and {len(missing_sections) - 5} more")
+                
+                # Write updated config back to file
+                try:
+                    import toml
+                    with open(config_path, 'w') as f:
+                        toml.dump(config, f)
+                    print(f"   ✓ Updated {config_path} with missing settings")
+                except ImportError:
+                    print("   ⚠️  Could not update config file (toml package not installed)")
+                except Exception as e:
+                    print(f"   ⚠️  Could not update config file: {e}")
+                    
+        except Exception as e:
+            print(f"Warning: Could not check template config: {e}")
+    
     return config
 
 def merge_config_with_args(args, config: Dict[str, Any], cli_provided: set):

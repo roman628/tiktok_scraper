@@ -28,56 +28,154 @@ function extractMSToken() {
   return null;
 }
 
-// Notification queue system
-let notificationQueue = [];
-let isNotificationActive = false;
+// Persistent notification system with counter
+let notificationElement = null;
+let urlCounter = 0;
+let closeTimeout = null;
 
-function processNotificationQueue() {
-  if (isNotificationActive || notificationQueue.length === 0) return;
+function createOrUpdateNotification() {
+  // Clear any existing close timeout
+  if (closeTimeout) {
+    clearTimeout(closeTimeout);
+    closeTimeout = null;
+  }
   
-  isNotificationActive = true;
-  const { message, isError } = notificationQueue.shift();
-  
-  const notification = document.createElement('div');
-  notification.style.cssText = `
-    position: fixed;
-    top: 20px;
-    right: 20px;
-    padding: 12px 20px;
-    background: ${isError ? '#ff4757' : '#2ed573'};
-    color: white;
-    border-radius: 6px;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    font-size: 14px;
-    z-index: 10000;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-    transition: all 0.3s ease;
-    transform: translateX(100%);
-  `;
-  notification.textContent = message;
-  
-  document.body.appendChild(notification);
-  
-  setTimeout(() => {
-    notification.style.transform = 'translateX(0)';
-  }, 100);
-  
-  setTimeout(() => {
-    notification.style.transform = 'translateX(100%)';
+  // Create notification if it doesn't exist
+  if (!notificationElement) {
+    notificationElement = document.createElement('div');
+    notificationElement.style.cssText = `
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      padding: 12px 20px;
+      background: #2ed573;
+      color: white;
+      border-radius: 6px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+      z-index: 10000;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      transition: all 0.3s ease;
+      transform: translateX(100%);
+    `;
+    document.body.appendChild(notificationElement);
+    
+    // Slide in
     setTimeout(() => {
-      if (notification.parentNode) {
-        notification.parentNode.removeChild(notification);
-      }
-      isNotificationActive = false;
-      // Process next notification in queue
-      processNotificationQueue();
-    }, 300);
+      notificationElement.style.transform = 'translateX(0)';
+    }, 100);
+  }
+  
+  // Update counter text
+  notificationElement.textContent = `✓ ${urlCounter} TikTok URL${urlCounter !== 1 ? 's' : ''} added`;
+  
+  // Add pulse animation for counter update
+  notificationElement.style.animation = 'pulse 0.3s ease';
+  setTimeout(() => {
+    notificationElement.style.animation = '';
+  }, 300);
+  
+  // Set timeout to close after 3 seconds of inactivity
+  closeTimeout = setTimeout(() => {
+    if (notificationElement) {
+      notificationElement.style.transform = 'translateX(100%)';
+      setTimeout(() => {
+        if (notificationElement && notificationElement.parentNode) {
+          notificationElement.parentNode.removeChild(notificationElement);
+        }
+        notificationElement = null;
+        urlCounter = 0;
+      }, 300);
+    }
   }, 3000);
 }
 
 function showNotification(message, isError = false) {
-  notificationQueue.push({ message, isError });
-  processNotificationQueue();
+  if (isError) {
+    // For errors, create a separate temporary notification
+    const errorNotification = document.createElement('div');
+    errorNotification.style.cssText = `
+      position: fixed;
+      top: ${notificationElement ? '80px' : '20px'};
+      right: 20px;
+      padding: 12px 20px;
+      background: #ff4757;
+      color: white;
+      border-radius: 6px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+      z-index: 10000;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      transition: all 0.3s ease;
+      transform: translateX(100%);
+    `;
+    errorNotification.textContent = message;
+    document.body.appendChild(errorNotification);
+    
+    setTimeout(() => {
+      errorNotification.style.transform = 'translateX(0)';
+    }, 100);
+    
+    setTimeout(() => {
+      errorNotification.style.transform = 'translateX(100%)';
+      setTimeout(() => {
+        if (errorNotification.parentNode) {
+          errorNotification.parentNode.removeChild(errorNotification);
+        }
+      }, 300);
+    }, 3000);
+  } else if (message.includes('TikTok URL added')) {
+    // Increment counter and update persistent notification
+    urlCounter++;
+    createOrUpdateNotification();
+  } else {
+    // For other success messages (like MS_TOKEN), show temporary notification
+    const tempNotification = document.createElement('div');
+    tempNotification.style.cssText = `
+      position: fixed;
+      top: ${notificationElement ? '80px' : '20px'};
+      right: 20px;
+      padding: 12px 20px;
+      background: #2ed573;
+      color: white;
+      border-radius: 6px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+      z-index: 10000;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      transition: all 0.3s ease;
+      transform: translateX(100%);
+    `;
+    tempNotification.textContent = message;
+    document.body.appendChild(tempNotification);
+    
+    setTimeout(() => {
+      tempNotification.style.transform = 'translateX(0)';
+    }, 100);
+    
+    setTimeout(() => {
+      tempNotification.style.transform = 'translateX(100%)';
+      setTimeout(() => {
+        if (tempNotification.parentNode) {
+          tempNotification.parentNode.removeChild(tempNotification);
+        }
+      }, 300);
+    }, 3000);
+  }
+}
+
+// Add CSS animation for pulse effect
+if (!document.getElementById('tiktok-extension-styles')) {
+  const style = document.createElement('style');
+  style.id = 'tiktok-extension-styles';
+  style.textContent = `
+    @keyframes pulse {
+      0% { transform: translateX(0) scale(1); }
+      50% { transform: translateX(0) scale(1.05); }
+      100% { transform: translateX(0) scale(1); }
+    }
+  `;
+  document.head.appendChild(style);
 }
 
 let processedURLs = new Set();
@@ -149,7 +247,7 @@ const observer = new MutationObserver(() => {
     setTimeout(() => {
       checkAndCaptureURL();
       // Don't resend MS_TOKEN on navigation, only on refresh
-    }, 1000);
+    }, 100);
   }
 });
 

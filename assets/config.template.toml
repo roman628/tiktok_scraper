@@ -93,6 +93,8 @@ show_progress = true
 metadata = true        # Video download and metadata extraction
 transcription = true   # Whisper AI transcription
 comments = false       # TikTok API comments (currently non-functional)
+hashtags = true        # Extract hashtags from titles/descriptions
+ocr_text = true        # Extract on-screen text from first frame using OCR
 
 [database]
 # PostgreSQL configuration (recommended over JSON for better performance)

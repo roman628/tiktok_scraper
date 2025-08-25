@@ -41,19 +41,25 @@ Test report validates:
 - **collector.py** (~600 lines) - Main orchestrator
   - `RobustTikTokProcessor`: Unified processor for all worker modes
   - `process_tiktok_url`: Core URL processing function with consistent flattened output
-- **src/** - Clean separation of concerns (12 modules):
-  - `video_extractor.py` - yt-dlp downloads & metadata extraction
+- **src/** - Core processing modules (data extraction, database):
+  - `video_extractor.py` - yt-dlp downloads & metadata extraction (including music/artist/timestamps)
   - `comment_extractor.py` - TikTok API with MS_TOKEN (currently non-functional)
   - `transcript_extractor.py` - Whisper AI transcription with GPU/CPU support
+  - `text_extractor.py` - OCR text extraction from video frames using EasyOCR (GPU/CPU)
   - `database_manager.py` - PostgreSQL operations with connection pooling & caching
   - `data_manager.py` - JSON streaming, file locking & duplicate detection (legacy)
   - `url_processor.py` - URL validation, normalization & ID extraction
-  - `resource_manager.py` - Memory monitoring & process cleanup
-  - `device_manager.py` - CUDA/MPS/CPU detection & configuration
   - `models.py` - Type-safe data structures (Comment, VideoData, ProcessingState)
+  - `recalibrator.py` - Batch processing for adding new attributes to existing videos
+- **utils/** - System utilities and resource management:
+  - `resource_manager.py` - Memory monitoring, process cleanup, file/directory cleanup
+  - `device_manager.py` - CUDA/MPS/CPU detection & configuration for all AI operations
   - `display_manager.py` - Rich terminal UI with responsive grid layout
   - `worker_progress.py` - Stage-based progress reporting (6 weighted stages)
+  - `worker_manager.py` - Multi-worker orchestration and task distribution
   - `shutdown_manager.py` - Centralized graceful shutdown handling
+  - `collector_registry.py` - Process tracking and management
+  - `data_manager.py` - Legacy JSON data management (being phased out)
 
 ### Processing Pipeline
 ```
@@ -76,11 +82,26 @@ URLs → Filter Duplicates → Process → {
 - **Stage-based Progress**: 6-stage weighted progress reporting per URL
 - **GPU Acceleration**: CUDA & MPS support with automatic fallback to CPU
 
+### Device Management System
+The `DeviceManager` class (`utils/device_manager.py`) automatically handles all GPU/CPU detection and configuration system-wide. It detects CUDA (NVIDIA), MPS (Apple Silicon), and CPU availability, selecting the best available device without user configuration. The system uses this unified device manager for all AI operations (Whisper, CLIP, future models).
+
+**Important**: Some AI features may not support CPU-only fallback due to computational requirements. When a feature requires GPU but none is available, the system will:
+1. Display a clear warning in both Rich UI panels and standard console output
+2. Log that the feature was skipped due to hardware limitations
+3. Continue processing other features without stalling
+4. Mark the feature as "skipped_no_gpu" in the database for potential future reprocessing
+
+This ensures the pipeline never hangs on impossible operations while maintaining transparency about what was and wasn't processed.
+
 ### What System Extracts
 1. **Video metadata** (views, likes, shares, duration, timestamps, author info)
+   - **Music/Audio**: Track name and artist from TikTok sounds
+   - **Precise timestamps**: Hour and minute of upload extracted from Unix timestamp
 2. **Transcripts** (Whisper AI with GPU acceleration)
-3. **Comments** (with nested replies - currently unavailable)
-4. **PostgreSQL storage** with normalized schema (primary storage)
+3. **On-screen text** (OCR extraction from first frame using EasyOCR)
+4. **Hashtags** (Automatically extracted from titles/descriptions into normalized tables)
+5. **Comments** (with nested replies - currently unavailable due to API restrictions)
+6. **PostgreSQL storage** with normalized schema (primary storage)
 
 ## Configuration
 
@@ -94,12 +115,15 @@ URLs → Filter Duplicates → Process → {
 
 ### config.toml Sections
 ```toml
-[tiktok]      # ms_token
-[download]    # quality, whisper settings
-[processing]  # batch_size, delay, workers
-[display]     # mode, raw_log, refresh_rate, console_lines
-[database]    # PostgreSQL connection settings (always used)
+[tiktok]           # ms_token
+[download]         # quality, whisper settings
+[processing]       # batch_size, delay, workers
+[display]          # mode, raw_log, refresh_rate, console_lines
+[data_collection]  # Enable/disable hashtags, OCR, transcription, etc.
+[database]         # PostgreSQL connection settings (always used)
 ```
+
+**Auto-Config Updates**: The collector automatically detects missing configuration settings by comparing `config.toml` with `assets/config.template.toml`. Any missing settings are added with default values and a warning is displayed, ensuring the system always has required configuration without manual intervention.
 
 ## Enhanced Display System
 
@@ -129,6 +153,8 @@ Each URL progresses through weighted stages:
 5. **Comments** (85-95%): Comment extraction (if MS_TOKEN available)
 6. **Saving** (95-100%): Save to PostgreSQL database
 
+The processing pipeline is sequential per worker, with each stage completing before the next begins. This allows GPU memory to be cleared between GPU-intensive operations (like Whisper transcription and CLIP analysis). Each stage can be independently enabled/disabled via config.toml settings, and new analysis stages can be inserted into the pipeline without disrupting existing functionality.
+
 ### Display Modes
 - **Rich Mode**: Full visual display with panels and progress bars
 - **Simple Mode**: Basic line-by-line output for non-TTY environments
@@ -154,6 +180,8 @@ The system now uses PostgreSQL as primary storage (enabled by default in config.
 - **ACID transactions** ensure data integrity
 
 ### Database Schema
+
+**Important**: All database schema changes should be directly added to `database/schema.sql` to maintain a single source of truth for the database structure.
 
 #### videos table
 Primary table storing video metadata:
@@ -272,6 +300,11 @@ database = "tiktok_scraper"
 user = "postgres"
 ```
 
+### Setup Script
+The project includes an intelligent setup script (`setup.sh`) that automatically configures the entire environment with zero arguments required. It detects your OS (macOS/Linux), installs system dependencies (ffmpeg, PostgreSQL), creates a Python virtual environment, installs all Python packages with appropriate GPU support (CUDA/MPS/CPU), sets up the PostgreSQL database with the medallion architecture, and configures all project files. The script maintains state between runs, allowing it to resume if interrupted.
+
+The `--migrate` flag is particularly important for database updates: running `./setup.sh --migrate` will apply any new schema changes from `database/schema.sql` to your existing database, create a timestamped backup before migration, run medallion architecture migrations, and update ML features in the gold layer. This makes it safe to update the database structure without losing data.
+
 ## Dashboard System
 
 ### Live Polling Mechanism
@@ -331,6 +364,11 @@ The system has been fully migrated to PostgreSQL as the primary storage mechanis
 - Test scripts export from database using `DatabaseManager.export_to_json()` for validation
 - Default database user is 'postgres'
 - The system will error if database connection fails - there's no JSON fallback
+
+### Future Video Attributes & Recalibration System
+The system is designed to support adding new analysis capabilities to existing videos without re-downloading content. New attributes like visual analysis (CLIP, BLIP), audio features, or enhanced metadata are stored in separate normalized tables linked by video ID, similar to how transcriptions and comments are handled. This modular database design allows different AI models to contribute their own specialized insights without modifying the core videos table.
+
+When new analysis capabilities are added, the `--recalibrate` flag (see `src/recalibrator.py`) allows batch processing of existing videos to add missing attributes. For example, `--recalibrate visual` would run CLIP analysis on all videos lacking visual embeddings, while `--recalibrate transcripts` re-processes videos needing transcription updates. The recalibrator automatically identifies which videos need processing, manages batch sizes for GPU memory constraints, and updates only the relevant analysis tables without touching existing data.
 
 **NOTE** comment extraction has been patched indefinitely and there is nothing we can do as of 8/20/2025 to fix it 
 - any new additions to the config.toml should be added to the config.template.toml
