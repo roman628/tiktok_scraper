@@ -211,6 +211,29 @@ SELECT
 -- GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO tiktok_user;
 -- GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO tiktok_user;
 
+-- Categories table (for video categorization)
+CREATE TABLE IF NOT EXISTS categories (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) UNIQUE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Video-category relationship (many-to-many with confidence scores)
+CREATE TABLE IF NOT EXISTS video_categories (
+    video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE,
+    category_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
+    confidence_score DECIMAL(3,2) CHECK (confidence_score >= 0 AND confidence_score <= 1),
+    categorized_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    model_used VARCHAR(50),
+    PRIMARY KEY (video_id, category_id)
+);
+
+-- Create indexes for category tables
+CREATE INDEX IF NOT EXISTS idx_categories_name ON categories(name);
+CREATE INDEX IF NOT EXISTS idx_video_categories_video_id ON video_categories(video_id);
+CREATE INDEX IF NOT EXISTS idx_video_categories_category_id ON video_categories(category_id);
+CREATE INDEX IF NOT EXISTS idx_video_categories_confidence ON video_categories(confidence_score);
+
 -- =====================================================================
 -- MEDALLION ARCHITECTURE IMPLEMENTATION
 -- =====================================================================
