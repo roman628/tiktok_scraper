@@ -365,16 +365,16 @@ The ML training script (`ml/train_ml.py`) sends HTTP signals to the dashboard:
 ## Content Categorization System
 
 ### Overview
-The project includes a sophisticated two-phase content categorization system that automatically identifies and assigns contextual categories to TikTok videos based on their transcript content. This system consists of two main components: `utility/categorize_videos.py` for category discovery and `identify_context.py` for category assignment. The system has successfully discovered 1,861 unique content categories and categorized 2,456 videos based purely on their transcript content.
+The project includes a sophisticated two-phase content categorization system that automatically identifies and assigns contextual categories to TikTok videos based on their transcript content. This system consists of two main components: `utility/categorize_videos.py` for category discovery and `src/identify_context.py` for category assignment. The system has successfully discovered 1,861 unique content categories and categorized 2,456 videos based purely on their transcript content.
 
 ### Phase 1: Category Discovery (`utility/categorize_videos.py`)
 The category discovery tool leverages Google's Gemini 1.5 Flash API to analyze thousands of videos in batches and discover content categories. It processes videos in batches of approximately 200,000 tokens (staying under the free tier limit of 250K tokens/minute), using tiktoken for accurate token counting. The script truncates titles to 500 characters and transcripts to 500 words to fit within token limits while maximizing content analysis. It automatically discovers between 200-500 distinct categories per batch by analyzing the collective content patterns across all videos. Categories are saved incrementally after each successful batch to prevent data loss, with automatic deduplication handled at the database level through PostgreSQL's `ON CONFLICT DO NOTHING` clause. The system includes a 60-second delay between API calls for rate limiting on the free tier. Running this tool populated the database with 1,861 unique content categories ranging from broad genres like "storytime" and "tutorial" to specific niches like "family drama", "reddit stories", and "relationship advice". Usage is simple: `python utility/categorize_videos.py --api-key YOUR_KEY`.
 
-### Phase 2: Context Identification (`identify_context.py`)
+### Phase 2: Context Identification (`src/identify_context.py`)
 Once categories are discovered, the context identification system uses lightweight sentence transformers (BERT-based models like all-MiniLM-L6-v2) to efficiently assign categories to individual videos. This system runs entirely locally on GPU/MPS/CPU without any API costs, processing videos at ~200-500 videos per second on modern hardware. Critically, it uses ONLY the video transcripts for categorization, completely ignoring titles and descriptions to avoid bias - for example, a video titled "#fyp #viral" gets categorized as "saving money" based on its actual content about holiday savings, not the generic title. The system employs cosine similarity between video transcript embeddings and category embeddings to find the best matches, assigning up to 5 categories per video with confidence scores ranging from 0.0 to 1.0. Each category is expanded with contextual keywords for better matching accuracy - for example, "tutorial" categories are expanded with terms like "how to guide teaching learn instruction". The system processes videos in configurable batches (default 32) for optimal GPU utilization and saves results directly to the `video_categories` junction table with confidence scores and model attribution.
 
 ### Integration and Database Schema
-The categorization system seamlessly integrates with the existing PostgreSQL database through two new tables: `categories` (storing unique category names) and `video_categories` (a junction table storing video-to-category relationships with confidence scores). After initial category discovery, all videos with transcripts can be categorized using `python identify_context.py`, with options for batch size (`--batch-size`), confidence threshold (`--threshold`), and processing limits (`--limit`). The system maintains proper foreign key relationships and indexes for fast querying. For pipeline integration, the identify_context functionality can be called directly after the transcription step in `collector.py`, ensuring every new video gets automatically categorized based on its content. The categorization adds minimal overhead to the pipeline while providing valuable content classification that can be used for ML training, content filtering, and trend analysis.
+The categorization system seamlessly integrates with the existing PostgreSQL database through two new tables: `categories` (storing unique category names) and `video_categories` (a junction table storing video-to-category relationships with confidence scores). After initial category discovery, all videos with transcripts can be categorized using `python src/identify_context.py`, with options for batch size (`--batch-size`), confidence threshold (`--threshold`), and processing limits (`--limit`). The system maintains proper foreign key relationships and indexes for fast querying. For pipeline integration, the identify_context functionality can be called directly after the transcription step in `collector.py`, ensuring every new video gets automatically categorized based on its content. The categorization adds minimal overhead to the pipeline while providing valuable content classification that can be used for ML training, content filtering, and trend analysis.
 
 ## Development Guidelines
 - Use `codebase-structure-analyzer` agent frequently for large file analysis
@@ -383,6 +383,15 @@ The categorization system seamlessly integrates with the existing PostgreSQL dat
 - Run tests after every change
 - See `/Users/ethan/tiktok_scraper-1/tiktok_data_collection_uml_analysis.md` for class structure
 - See `/Users/ethan/tiktok_scraper-1/database/README.md` for database setup and operations
+
+## Python Dependencies Management
+**CRITICAL**: ALL Python packages must be added to `requirements.txt` ONLY
+- Never install packages individually via pip in setup scripts
+- Never hardcode pip install commands outside of requirements.txt
+- The setup.sh script should ONLY run: `pip install -r requirements.txt`
+- When adding new dependencies, update requirements.txt first
+- This ensures reproducible builds and consistent environments
+- GPU-specific packages (torch with CUDA/MPS) should be handled via conditional logic reading from requirements.txt
 
 ## Important Implementation Notes
 
@@ -421,7 +430,7 @@ The `enhanced_worker_process` is the primary worker implementation that includes
 - Context identification requires the virtual environment to be active (for psycopg2 and sentence-transformers)
 - The context identifier is initialized per worker with lazy loading to defer model loading
 - It only runs when a transcript is available (requires `transcript=True`)
-- Uses the `identify_context.py` module with BERT-based sentence transformers
+- Uses the `src/identify_context.py` module with BERT-based sentence transformers
 - Saves categories to the `video_categories` junction table with confidence scores
 
 **Worker Lifecycle and Completion Detection**:

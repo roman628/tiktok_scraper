@@ -340,52 +340,40 @@ setup_python_env() {
     
     # Install requirements
     if [ -f "requirements.txt" ]; then
-        print_msg $YELLOW "Installing Python dependencies..."
+        print_msg $YELLOW "Installing Python dependencies from requirements.txt..."
         print_msg $CYAN "  This may take a few minutes..."
         
-        # Install in chunks to show progress
-        pip install --upgrade wheel setuptools --quiet
+        # Upgrade pip and essential build tools first
+        pip install --upgrade pip wheel setuptools --quiet
         
-        # Core dependencies
-        print_msg $CYAN "  Installing core dependencies..."
-        pip install numpy pandas toml tomli psutil aiofiles --quiet
-        
-        # Django and web
-        print_msg $CYAN "  Installing Django framework..."
-        pip install django djangorestframework django-cors-headers --quiet
-        
-        # Database
-        print_msg $CYAN "  Installing database drivers..."
-        pip install psycopg2-binary --quiet
-        
-        # ML dependencies
-        print_msg $CYAN "  Installing ML libraries..."
-        pip install scikit-learn xgboost joblib scipy nltk textstat --quiet
-        
-        # Audio/Video processing
-        print_msg $CYAN "  Installing media processing libraries..."
-        pip install yt-dlp faster-whisper --quiet
-        
-        # GPU support (conditional)
+        # Install all dependencies from requirements.txt
+        # Handle PyTorch separately based on GPU type
         if [ "$GPU_TYPE" = "cuda" ]; then
-            print_msg $CYAN "  Installing CUDA support for PyTorch..."
+            print_msg $CYAN "  Installing with CUDA support for PyTorch..."
+            # Install PyTorch with CUDA before other requirements
             pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 --quiet
+            # Install everything else from requirements.txt (excluding torch lines)
+            grep -v "^torch" requirements.txt | pip install -r /dev/stdin --quiet
         elif [ "$GPU_TYPE" = "mps" ]; then
-            print_msg $CYAN "  Installing MPS support for PyTorch..."
+            print_msg $CYAN "  Installing with MPS support for PyTorch..."
+            # Install PyTorch with MPS support
             pip install torch torchvision torchaudio --quiet
+            # Install everything else from requirements.txt (excluding torch lines)
+            grep -v "^torch" requirements.txt | pip install -r /dev/stdin --quiet
         else
-            print_msg $CYAN "  Installing CPU-only PyTorch..."
+            print_msg $CYAN "  Installing with CPU-only PyTorch..."
+            # Install PyTorch CPU-only version
             pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --quiet
+            # Install everything else from requirements.txt (excluding torch lines)
+            grep -v "^torch" requirements.txt | pip install -r /dev/stdin --quiet
         fi
         
-        # UI and remaining
-        print_msg $CYAN "  Installing UI and utility libraries..."
-        pip install rich --quiet
-        
-        # Install any missing from requirements.txt
+        # Now install the full requirements.txt to catch any missing dependencies
+        # This will skip already installed packages
+        print_msg $CYAN "  Verifying all dependencies..."
         pip install -r requirements.txt --quiet 2>/dev/null || true
         
-        print_msg $GREEN "  ✓ All Python dependencies installed"
+        print_msg $GREEN "  ✓ All Python dependencies installed from requirements.txt"
     else
         print_msg $YELLOW "  ⚠ requirements.txt not found, skipping Python packages"
     fi
@@ -696,6 +684,83 @@ setup_ml_model() {
     print_msg $YELLOW "Downloading NLTK data..."
     python -c "import nltk; nltk.download('punkt', quiet=True); nltk.download('stopwords', quiet=True); nltk.download('vader_lexicon', quiet=True)" 2>/dev/null || true
     print_msg $GREEN "  ✓ NLTK data downloaded"
+    
+    # Check for categories and run categorize_videos if needed
+    CATEGORY_COUNT=$(PGPASSWORD=$DB_PASSWORD psql -U $DB_USER -d $DB_NAME -tAc \
+        "SELECT COUNT(*) FROM categories;" 2>/dev/null || echo "0")
+    
+    if [ "$CATEGORY_COUNT" -eq 0 ]; then
+        print_msg $YELLOW "\nNo categories found in database. Category discovery is needed for content identification."
+        
+        # Check if we have videos with transcripts to categorize
+        TRANSCRIPT_COUNT=$(PGPASSWORD=$DB_PASSWORD psql -U $DB_USER -d $DB_NAME -tAc \
+            "SELECT COUNT(*) FROM transcriptions WHERE whisper_transcription IS NOT NULL;" 2>/dev/null || echo "0")
+        
+        if [ "$TRANSCRIPT_COUNT" -gt 0 ]; then
+            print_msg $CYAN "Found $TRANSCRIPT_COUNT videos with transcripts to analyze."
+            print_msg $YELLOW "\nWould you like to run category discovery using Google Gemini API?"
+            print_msg $CYAN "This will analyze your videos and create content categories."
+            read -p "Run category discovery? (y/n): " -n 1 -r
+            echo
+            
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                print_msg $YELLOW "\nPlease enter your Google Gemini API key:"
+                print_msg $CYAN "Get one free at: https://makersuite.google.com/app/apikey"
+                read -s -p "API Key: " GEMINI_API_KEY
+                echo
+                
+                if [ ! -z "$GEMINI_API_KEY" ]; then
+                    print_msg $YELLOW "\nRunning category discovery..."
+                    python utility/categorize_videos.py --api-key "$GEMINI_API_KEY" 2>&1 | \
+                        while IFS= read -r line; do
+                            print_msg $CYAN "  $line"
+                        done
+                    
+                    # Check if categories were created
+                    NEW_CATEGORY_COUNT=$(PGPASSWORD=$DB_PASSWORD psql -U $DB_USER -d $DB_NAME -tAc \
+                        "SELECT COUNT(*) FROM categories;" 2>/dev/null || echo "0")
+                    
+                    if [ "$NEW_CATEGORY_COUNT" -gt 0 ]; then
+                        print_msg $GREEN "  ✓ Created $NEW_CATEGORY_COUNT content categories"
+                        
+                        # Now run context identification
+                        print_msg $YELLOW "\nRunning context identification on all videos..."
+                        python src/identify_context.py 2>&1 | \
+                            while IFS= read -r line; do
+                                print_msg $CYAN "  $line"
+                            done
+                        
+                        CATEGORIZED_COUNT=$(PGPASSWORD=$DB_PASSWORD psql -U $DB_USER -d $DB_NAME -tAc \
+                            "SELECT COUNT(DISTINCT video_id) FROM video_categories;" 2>/dev/null || echo "0")
+                        print_msg $GREEN "  ✓ Categorized $CATEGORIZED_COUNT videos"
+                    else
+                        print_msg $YELLOW "  ⚠ Category discovery did not create categories"
+                    fi
+                else
+                    print_msg $YELLOW "  ⚠ Skipping category discovery (no API key provided)"
+                fi
+            else
+                print_msg $YELLOW "  ⚠ Skipping category discovery"
+                print_msg $CYAN "  You can run it later with: python utility/categorize_videos.py --api-key YOUR_KEY"
+            fi
+        else
+            print_msg $YELLOW "  ⚠ No videos with transcripts found for category discovery"
+            print_msg $CYAN "  Run the collector with --whisper flag first to generate transcripts"
+        fi
+    else
+        print_msg $GREEN "  ✓ Found $CATEGORY_COUNT existing categories"
+        
+        # Check if videos need categorization
+        UNCATEGORIZED_COUNT=$(PGPASSWORD=$DB_PASSWORD psql -U $DB_USER -d $DB_NAME -tAc \
+            "SELECT COUNT(*) FROM videos v 
+             WHERE EXISTS (SELECT 1 FROM transcriptions t WHERE t.video_id = v.id)
+             AND NOT EXISTS (SELECT 1 FROM video_categories vc WHERE vc.video_id = v.id);" 2>/dev/null || echo "0")
+        
+        if [ "$UNCATEGORIZED_COUNT" -gt 0 ]; then
+            print_msg $YELLOW "  Found $UNCATEGORIZED_COUNT uncategorized videos with transcripts"
+            print_msg $CYAN "  You can categorize them with: python src/identify_context.py"
+        fi
+    fi
     
     save_state "ml_model" "completed"
     print_progress "ML model configured"

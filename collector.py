@@ -41,7 +41,7 @@ from utils.worker_manager import WorkerManager
 
 # Import context identifier (lazy loaded per worker)
 try:
-    from identify_context import ContextIdentifier, Config as ContextConfig
+    from src.identify_context import ContextIdentifier, Config as ContextConfig
     CONTEXT_IDENTIFICATION_AVAILABLE = True
 except ImportError:
     CONTEXT_IDENTIFICATION_AVAILABLE = False
