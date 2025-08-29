@@ -698,15 +698,38 @@ setup_ml_model() {
         
         if [ "$TRANSCRIPT_COUNT" -gt 0 ]; then
             print_msg $CYAN "Found $TRANSCRIPT_COUNT videos with transcripts to analyze."
-            print_msg $YELLOW "\nWould you like to run category discovery using Google Gemini API?"
-            print_msg $CYAN "This will analyze your videos and create content categories."
-            read -p "Run category discovery? (y/n): " -n 1 -r
-            echo
             
-            if [[ $REPLY =~ ^[Yy]$ ]]; then
-                print_msg $YELLOW "\nPlease enter your Google Gemini API key:"
-                print_msg $CYAN "Get one free at: https://makersuite.google.com/app/apikey"
-                read -s -p "API Key: " GEMINI_API_KEY
+            # First check if API key is in config
+            if [ -f config.toml ]; then
+                GEMINI_API_KEY=$(python -c "
+import tomllib
+with open('config.toml', 'rb') as f:
+    config = tomllib.load(f)
+    print(config.get('setup', {}).get('gemini_api_key', ''))
+" 2>/dev/null || echo "")
+            fi
+            
+            # If API key exists in config, run automatically
+            if [ ! -z "$GEMINI_API_KEY" ]; then
+                print_msg $GREEN "  ✓ Found Gemini API key in config.toml"
+                print_msg $YELLOW "\nRunning category discovery automatically..."
+                RUN_DISCOVERY="y"
+            else
+                # Otherwise ask
+                print_msg $YELLOW "\nWould you like to run category discovery using Google Gemini API?"
+                print_msg $CYAN "This will analyze your videos and create content categories."
+                read -p "Run category discovery? (y/n): " -n 1 -r
+                echo
+                RUN_DISCOVERY=$REPLY
+            fi
+            
+            if [[ $RUN_DISCOVERY =~ ^[Yy]$ ]]; then
+                # If not in config, ask for it
+                if [ -z "$GEMINI_API_KEY" ]; then
+                    print_msg $YELLOW "\nPlease enter your Google Gemini API key:"
+                    print_msg $CYAN "Get one free at: https://makersuite.google.com/app/apikey"
+                    read -s -p "API Key: " GEMINI_API_KEY
+                fi
                 echo
                 
                 if [ ! -z "$GEMINI_API_KEY" ]; then
