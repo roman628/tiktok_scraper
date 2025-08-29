@@ -269,11 +269,18 @@ category1, category2, category3, category4, category5"""
             cat = cat.strip().lower()
             
             # Validate category
-            if not cat or len(cat) < 2:
+            if not cat or len(cat) < 2 or len(cat) > 50:
                 continue
-            if len(cat.split()) > 3:
+            if len(cat.split()) > 4:  # Allow up to 4 words
                 continue
-            if any(char in cat for char in ['#', '@', '/', '\\', '"', "'"]):
+            # Filter out junk characters and code fragments
+            if any(char in cat for char in ['#', '@', '/', '\\', '"', "'", '[', ']', '{', '}', '(', ')', '+', '=', ':', ';', '<', '>', '|', '`']):
+                continue
+            # Must contain at least one letter
+            if not any(c.isalpha() for c in cat):
+                continue
+            # No pure numbers or codes
+            if cat.replace(' ', '').replace('-', '').replace('_', '').isdigit():
                 continue
             
             if cat not in seen:
@@ -282,7 +289,7 @@ category1, category2, category3, category4, category5"""
         
         return categories
     
-    def discover_from_batch(self, batch: List[Dict]) -> List[str]:
+    def discover_from_batch(self, batch: List[Dict], retry_on_token_error: bool = True) -> List[str]:
         """Discover categories from a single batch"""
         prompt = self.build_prompt(batch)
         prompt_tokens = self.token_calc.count_tokens(prompt)
@@ -299,6 +306,20 @@ category1, category2, category3, category4, category5"""
             
             return categories
         except Exception as e:
+            error_str = str(e)
+            if "token count" in error_str.lower() and "exceeds" in error_str.lower() and retry_on_token_error:
+                # Token limit exceeded, split batch and retry
+                print(f"  Token limit exceeded, splitting batch in half...")
+                half = len(batch) // 2
+                if half > 0:
+                    categories = []
+                    # Process first half
+                    print(f"  Processing first half ({half} videos)...")
+                    categories.extend(self.discover_from_batch(batch[:half], retry_on_token_error=True))
+                    # Process second half
+                    print(f"  Processing second half ({len(batch) - half} videos)...")
+                    categories.extend(self.discover_from_batch(batch[half:], retry_on_token_error=True))
+                    return categories
             print(f"  Error: {e}")
             return []
     
