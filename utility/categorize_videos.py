@@ -46,10 +46,10 @@ class Config:
     
     # API settings
     api_key: str = ""
-    model_name: str = "gemini-2.0-flash-exp"
+    model_name: str = "gemini-1.5-flash"
     
     # Token management
-    max_input_tokens: int = 200000  # Free tier limit
+    max_input_tokens: int = 1000000  # Paid tier limit for 1.5 Flash
     
     # Batch settings
     title_max_chars: int = 500
@@ -347,10 +347,10 @@ category1, category2, category3, category4, category5"""
                 print(f"  New unique categories: {len(new_cats)}")
                 print(f"  Total categories so far: {len(all_categories)}")
             
-            # Rate limiting for free tier
+            # Rate limiting - reduced for paid tier
             if i < len(batches):
-                print(f"\n⏳ Waiting 60 seconds for rate limit...")
-                time.sleep(60)
+                print(f"\n⏳ Waiting 2 seconds between requests...")
+                time.sleep(2)  # Minimal delay for paid tier
         
         print("\n" + "="*60)
         print(f"COMPLETE: Discovered {len(all_categories)} total categories")
