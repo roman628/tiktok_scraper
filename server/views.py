@@ -348,8 +348,10 @@ class CollectorCompleteView(View):
                                 cursor.execute("SELECT refresh_ml_training_view();")
                             
                             # Then run ML training
+                            # Use venv Python to ensure all dependencies are available
+                            venv_python = os.path.join(settings.BASE_DIR, 'venv', 'bin', 'python')
                             result = subprocess.run(
-                                ['python', 'ml/train_ml.py', 'train'],
+                                [venv_python, 'ml/train_ml.py', 'train'],
                                 capture_output=True,
                                 text=True,
                                 cwd=settings.BASE_DIR

@@ -13,9 +13,10 @@ class WorkerProgress:
     # Processing stages with their weight percentages
     STAGES = [
         ('validating', 5),
-        ('downloading', 30),
+        ('downloading', 25),
         ('metadata', 10),
-        ('transcribing', 40),
+        ('transcribing', 35),
+        ('context', 10),
         ('comments', 10),
         ('saving', 5),
     ]
@@ -142,6 +143,7 @@ class WorkerProgress:
             'downloading': 'Downloading video',
             'metadata': 'Extracting metadata',
             'transcribing': 'Transcribing audio',
+            'context': 'Identifying context',
             'comments': 'Fetching comments',
             'saving': 'Saving to JSON'
         }
@@ -237,6 +239,23 @@ class WorkerProgress:
     def skip_transcription(self, reason: str = "Whisper not enabled"):
         """Skip transcription stage"""
         self.send_log(f"Skipping transcription: {reason}", 'info')
+    
+    def start_context(self):
+        """Start context identification"""
+        self.send_progress('context', 0)
+        self.send_log('Identifying context', 'progress')
+    
+    def complete_context(self, categories: int = 0):
+        """Complete context identification"""
+        self.send_progress('context', 100)
+        if categories > 0:
+            self.send_log(f"Identified {categories} categories", 'success')
+        else:
+            self.send_log('Context identification complete', 'success')
+    
+    def skip_context(self, reason: str = "Context identification not enabled"):
+        """Skip context identification stage"""
+        self.send_log(f"Skipping context: {reason}", 'info')
     
     def start_comments(self):
         """Start comment extraction"""

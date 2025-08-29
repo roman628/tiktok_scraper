@@ -21,10 +21,6 @@ output_dir = "downloads"
 quality = "best"
 # Download audio only as MP3
 audio_only = false
-# Use Whisper for transcription
-use_whisper = true
-# Force CPU for Whisper (disable GPU acceleration)
-force_cpu = false
 
 [comments]
 # Maximum comments to extract per video (0 = all comments)
@@ -95,6 +91,7 @@ transcription = true   # Whisper AI transcription
 comments = false       # TikTok API comments (currently non-functional)
 hashtags = true        # Extract hashtags from titles/descriptions
 ocr_text = true        # Extract on-screen text from first frame using OCR
+context_identification = true  # Identify content categories using AI analysis of transcripts
 
 [database]
 # PostgreSQL configuration (recommended over JSON for better performance)

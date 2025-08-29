@@ -739,12 +739,20 @@ class DatabaseOrJsonManager:
         self.use_database = True  # Always true now
         logger.info("Using PostgreSQL database for storage")
     
-    def append_to_master(self, video_data: Dict[str, Any]) -> bool:
-        """Append video data to storage"""
+    def append_to_master(self, video_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Append video data to storage
+        
+        Returns:
+            Dict with 'id' key if successful, None otherwise
+        """
         if self.use_database:
-            return self.manager.insert_video(video_data) is not None
+            video_id = self.manager.insert_video(video_data)
+            if video_id is not None:
+                return {'id': video_id, 'success': True}
+            return None
         else:
-            return self.manager.append_to_master(video_data)
+            success = self.manager.append_to_master(video_data)
+            return {'success': success} if success else None
     
     def is_duplicate(self, url: str) -> bool:
         """Check if URL is duplicate"""

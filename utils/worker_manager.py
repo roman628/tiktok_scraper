@@ -9,6 +9,13 @@ from datetime import datetime, timedelta
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+# Import context identifier (lazy loaded per worker)
+try:
+    from identify_context import ContextIdentifier, Config as ContextConfig
+    CONTEXT_IDENTIFICATION_AVAILABLE = True
+except ImportError:
+    CONTEXT_IDENTIFICATION_AVAILABLE = False
+
 class WorkerManager:
     """Manages worker processes with heartbeat tracking and database-based completion detection"""
     
@@ -25,7 +32,7 @@ class WorkerManager:
         return psycopg2.connect(
             host=self.db_config.get('host', 'localhost'),
             database=self.db_config.get('database', 'tiktok_scraper'),
-            user=self.db_config.get('user', 'root'),
+            user=self.db_config.get('user'),
             password=self.db_config.get('password', ''),
             cursor_factory=RealDictCursor
         )
@@ -237,6 +244,23 @@ class WorkerManager:
     
     def detect_completion(self, workers: List[mp.Process]) -> bool:
         """Detect if all workers have completed using multiple signals"""
+        # Check database for pending URLs first
+        try:
+            with self.get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Check if there are any URLs still pending or processing
+                    cur.execute("""
+                        SELECT COUNT(*) FROM queued_urls 
+                        WHERE status IN ('pending', 'processing')
+                    """)
+                    pending_count = cur.fetchone()['count']
+                    
+                    if pending_count > 0:
+                        # Still work to do
+                        return False
+        except Exception as e:
+            print(f"Warning: Could not check pending URLs: {e}")
+        
         # Check database for completion status
         completed_in_db = self.get_completed_worker_count()
         
@@ -246,18 +270,25 @@ class WorkerManager:
         # Check worker health
         worker_health = self.check_worker_health()
         active_workers = sum(1 for status in worker_health.values() 
-                            if status in ['active', 'starting', 'idle'])
+                            if status in ['active', 'starting'])  # Removed 'idle' from active status
         
         # Workers are done if:
         # 1. All marked complete in database, OR
         # 2. No processes alive, OR  
-        # 3. All workers idle/dead for extended period
+        # 3. No active workers AND no pending URLs
         all_complete = completed_in_db >= self.worker_count
         all_dead = alive_processes == 0
-        all_idle = active_workers == 0 and len(worker_health) > 0
+        all_inactive = active_workers == 0 and pending_count == 0
         
-        if all_complete or all_dead or all_idle:
+        if all_complete or all_dead:
             return True
+        
+        # Only return true for all_inactive if we've verified no pending work
+        if all_inactive and len(worker_health) > 0:
+            # Double-check that workers have been idle for a bit
+            idle_workers = sum(1 for status in worker_health.values() if status == 'idle')
+            if idle_workers >= self.worker_count:
+                return True
             
         return False
     
@@ -384,6 +415,41 @@ async def async_enhanced_worker(
         db_manager = DatabaseOrJsonManager(config=config)
         data_manager = db_manager  # DatabaseOrJsonManager implements the DataManager interface
         
+        # Setup Context Identifier if enabled
+        context_identifier = None
+        data_collection_config = config.get('data_collection', {}) if config else {}
+        context_enabled = data_collection_config.get('context_identification', True)
+        
+        progress.send_log(f'Context setup: enabled={context_enabled}, available={CONTEXT_IDENTIFICATION_AVAILABLE}', 'info')
+        
+        if not CONTEXT_IDENTIFICATION_AVAILABLE:
+            if context_enabled:
+                progress.send_log('Context identification not available (import failed)', 'warning')
+        elif context_enabled:
+            try:
+                # Create config for context identifier
+                db_config = config.get('database', {})
+                context_config = ContextConfig(
+                    db_host=db_config.get('host', 'localhost'),
+                    db_port=db_config.get('port', 5432),
+                    db_name=db_config.get('database', 'tiktok_scraper'),
+                    db_user=db_config.get('user'),
+                    db_password=db_config.get('password', ''),
+                    model_name='all-MiniLM-L6-v2',  # Fast and efficient model
+                    confidence_threshold=0.3
+                )
+                # Initialize with lazy loading to defer model loading until needed
+                progress.send_log(f'Creating context identifier with db_user={context_config.db_user}', 'info')
+                context_identifier = ContextIdentifier(context_config, lazy_load=True)
+                progress.send_log('Context identification enabled', 'info')
+            except Exception as e:
+                import traceback
+                progress.send_log(f'Failed to initialize context identifier: {e}', 'warning')
+                progress.send_log(f'Traceback: {traceback.format_exc()}', 'debug')
+                context_identifier = None
+        else:
+            progress.send_log('Context identification disabled in config', 'info')
+        
         # Track current URL for heartbeats
         current_url = None
         
@@ -429,7 +495,7 @@ async def async_enhanced_worker(
                 conn = psycopg2.connect(
                     host=config.get('database', {}).get('host', 'localhost'),
                     database=config.get('database', {}).get('database', 'tiktok_scraper'),
-                    user=config.get('database', {}).get('user', 'root'),
+                    user=config.get('database', {}).get('user'),
                     password=config.get('database', {}).get('password', '')
                 )
                 with conn.cursor() as cur:
@@ -475,7 +541,8 @@ async def async_enhanced_worker(
                     ms_token=ms_token,
                     whisper_config=whisper_config,
                     shutdown_event=shutdown_event,
-                    config=config
+                    config=config,
+                    context_identifier=context_identifier
                 )
                 
                 # Update database based on result
@@ -486,7 +553,7 @@ async def async_enhanced_worker(
                         conn = psycopg2.connect(
                             host=config.get('database', {}).get('host', 'localhost'),
                             database=config.get('database', {}).get('database', 'tiktok_scraper'),
-                            user=config.get('database', {}).get('user', 'root'),
+                            user=config.get('database', {}).get('user'),
                             password=config.get('database', {}).get('password', '')
                         )
                         with conn.cursor() as cur:
@@ -507,7 +574,7 @@ async def async_enhanced_worker(
                         conn = psycopg2.connect(
                             host=config.get('database', {}).get('host', 'localhost'),
                             database=config.get('database', {}).get('database', 'tiktok_scraper'),
-                            user=config.get('database', {}).get('user', 'root'),
+                            user=config.get('database', {}).get('user'),
                             password=config.get('database', {}).get('password', '')
                         )
                         with conn.cursor() as cur:
@@ -536,7 +603,7 @@ async def async_enhanced_worker(
                     conn = psycopg2.connect(
                         host=config.get('database', {}).get('host', 'localhost'),
                         database=config.get('database', {}).get('database', 'tiktok_scraper'),
-                        user=config.get('database', {}).get('user', 'root'),
+                        user=config.get('database', {}).get('user'),
                         password=config.get('database', {}).get('password', '')
                     )
                     with conn.cursor() as cur:
@@ -563,6 +630,16 @@ async def async_enhanced_worker(
         traceback.print_exc()
         
     finally:
+        # Cleanup resources
+        try:
+            video_extractor.cleanup()
+            if comment_extractor:
+                await comment_extractor.cleanup()
+            if context_identifier:
+                context_identifier.cleanup()
+        except Exception as e:
+            print(f"Worker {worker_id} cleanup error: {e}")
+        
         # Send completion status via status queue (more reliable)
         for attempt in range(5):
             try:

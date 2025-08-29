@@ -18,6 +18,24 @@ collector.py     # Main orchestrator
 config.toml      # Configuration
 ```
 
+## Critical Environment and Configuration Requirements
+
+## Critical Configuration Requirements
+
+**DATABASE USER CONFIGURATION - CRITICAL**: 
+- **NEVER use 'root' as a default database user** - this has caused persistent connection issues
+- All database connections MUST use the configured user from `config.toml`
+- Default database user should be 'postgres' to align with PostgreSQL standards
+- The `[database]` section in config.toml must specify the correct user:
+  ```toml
+  [database]
+  user = "your_actual_postgres_user"  # Often 'postgres' or your system username
+  ```
+- This applies to ALL files that connect to the database, especially:
+  - `utils/worker_manager.py`
+  - `src/database_manager.py`
+  - `collector.py`
+
 ## Testing Requirements
 
 **CRITICAL**: After ANY changes to `collector.py` or `src/` modules:
@@ -386,3 +404,36 @@ When new analysis capabilities are added, the `--recalibrate` flag (see `src/rec
 
 **NOTE** comment extraction has been patched indefinitely and there is nothing we can do as of 8/20/2025 to fix it 
 - any new additions to the config.toml should be added to the config.template.toml
+
+### Worker Architecture and Context Identification (as of 8/29/2025)
+
+**CRITICAL**: The system uses two different worker implementations depending on how the collector is started:
+1. **Direct execution** (`python collector.py`): Uses `worker_process_single` from `collector.py`
+2. **Normal execution** (via Django or direct): Uses `enhanced_worker_process` from `utils/worker_manager.py`
+
+The `enhanced_worker_process` is the primary worker implementation that includes:
+- Context identification initialization and cleanup
+- Heartbeat monitoring and status reporting  
+- Database-based URL queue management
+- Proper resource cleanup in finally blocks
+
+**Context Identification Integration**:
+- Context identification requires the virtual environment to be active (for psycopg2 and sentence-transformers)
+- The context identifier is initialized per worker with lazy loading to defer model loading
+- It only runs when a transcript is available (requires `transcript=True`)
+- Uses the `identify_context.py` module with BERT-based sentence transformers
+- Saves categories to the `video_categories` junction table with confidence scores
+
+**Worker Lifecycle and Completion Detection**:
+- Workers run in a continuous loop checking for URLs from the queue
+- The `detect_completion` method in `WorkerManager` checks database for pending/processing URLs
+- **IMPORTANT**: Do NOT add sentinel values (None) to the URL queue prematurely - this causes workers to exit before completing transcription
+- Workers send heartbeat signals with status ('idle', 'active', 'starting', 'completed')
+- Completion is detected when: no pending URLs exist AND all workers are idle or completed
+- The shutdown_event is set only after all processing is confirmed complete
+
+**Common Issues and Solutions**:
+1. **"Context identifier not initialized"**: Ensure virtual environment is active and imports succeed
+2. **Transcription interrupted**: Check that sentinel values aren't added to queue too early
+3. **Workers exit prematurely**: Verify `detect_completion` logic checks for pending URLs in database
+4. **Context identification skipped**: Ensure transcript is available and not empty

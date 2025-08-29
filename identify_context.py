@@ -178,18 +178,29 @@ class DatabaseManager:
 class ContextIdentifier:
     """Identifies video context using sentence transformers"""
     
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, lazy_load: bool = False):
         self.config = config
         self.db = DatabaseManager(config)
-        
-        print(f"Loading model: {config.model_name}...")
-        self.model = SentenceTransformer(config.model_name, device=DEVICE)
+        self.model = None
         
         # Load and encode categories
         self.categories = []
         self.category_ids = []
         self.category_embeddings = None
-        self.load_categories()
+        
+        if not lazy_load:
+            print(f"Loading model: {config.model_name}...")
+            self.model = SentenceTransformer(config.model_name, device=DEVICE)
+            self.load_categories()
+    
+    def ensure_model_loaded(self):
+        """Ensure model and categories are loaded (for lazy loading)"""
+        if self.model is None:
+            logging.info(f"Loading sentence transformer model: {self.config.model_name}")
+            self.model = SentenceTransformer(self.config.model_name, device=DEVICE)
+        
+        if not self.categories:
+            self.load_categories()
     
     def load_categories(self):
         """Load and encode all categories"""
@@ -244,8 +255,27 @@ class ContextIdentifier:
         # Return transcript or placeholder if empty
         return transcript.strip() or "no transcript available"
     
+    def cleanup(self):
+        """Clean up resources (for use in collector cleanup)"""
+        if self.model is not None:
+            del self.model
+            self.model = None
+        if self.category_embeddings is not None:
+            del self.category_embeddings
+            self.category_embeddings = None
+        # Clear GPU cache if using GPU
+        if DEVICE != 'cpu':
+            try:
+                import torch
+                torch.cuda.empty_cache() if DEVICE == 'cuda' else None
+            except:
+                pass
+    
     def identify_categories(self, video: Dict) -> Tuple[List[int], List[float], List[str]]:
         """Identify categories for a single video"""
+        # Ensure model is loaded (for lazy loading)
+        self.ensure_model_loaded()
+        
         # Prepare and encode video text
         video_text = self.prepare_video_text(video)
         video_embedding = self.model.encode(
@@ -282,6 +312,64 @@ class ContextIdentifier:
             selected_names = [self.categories[idx]]
         
         return selected_ids, selected_scores, selected_names
+    
+    def identify_and_save_single(self, video_id: int, transcript: str, db_manager=None) -> bool:
+        """Process a single video from collector pipeline
+        
+        Args:
+            video_id: Database ID of the video
+            transcript: Video transcript text
+            db_manager: Optional DatabaseOrJsonManager instance from collector
+        
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Create video dict with expected structure
+            video = {
+                'id': video_id,
+                'whisper_transcription': transcript
+            }
+            
+            # Identify categories
+            category_ids, confidence_scores, category_names = self.identify_categories(video)
+            
+            # Use provided db_manager if available, otherwise use our own
+            if db_manager:
+                # Use collector's database manager
+                conn = db_manager.pool.getconn()
+                try:
+                    with conn.cursor() as cur:
+                        # Clear existing categories
+                        cur.execute("DELETE FROM video_categories WHERE video_id = %s", (video_id,))
+                        
+                        # Insert new categories
+                        for cat_id, confidence in zip(category_ids, confidence_scores):
+                            cur.execute("""
+                                INSERT INTO video_categories 
+                                (video_id, category_id, confidence_score, model_used, categorized_at)
+                                VALUES (%s, %s, %s, 'sentence-transformer', NOW())
+                            """, (video_id, cat_id, confidence))
+                        
+                        conn.commit()
+                        
+                        # Log result
+                        if category_names:
+                            logging.info(f"Video {video_id} categorized as: {', '.join(category_names[:3])}")
+                        
+                        return True
+                finally:
+                    db_manager.pool.putconn(conn)
+            else:
+                # Use our own database manager
+                self.db.save_video_categories(video_id, category_ids, confidence_scores)
+                if category_names:
+                    logging.info(f"Video {video_id} categorized as: {', '.join(category_names[:3])}")
+                return True
+                
+        except Exception as e:
+            logging.error(f"Error identifying context for video {video_id}: {e}")
+            return False
     
     def process_batch(self, videos: List[Dict]) -> Tuple[int, int]:
         """Process a batch of videos"""

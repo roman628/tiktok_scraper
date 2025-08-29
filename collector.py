@@ -39,6 +39,13 @@ from utils.worker_progress import WorkerProgress
 from utils.collector_registry import CollectorRegistry, CollectorConfig
 from utils.worker_manager import WorkerManager
 
+# Import context identifier (lazy loaded per worker)
+try:
+    from identify_context import ContextIdentifier, Config as ContextConfig
+    CONTEXT_IDENTIFICATION_AVAILABLE = True
+except ImportError:
+    CONTEXT_IDENTIFICATION_AVAILABLE = False
+
 class RobustTikTokProcessor:
     """Main processor for TikTok data collection."""
     
@@ -306,10 +313,6 @@ class RobustTikTokProcessor:
         for url in urls:
             url_queue.put(url)
         
-        # Add sentinel values
-        for _ in range(self.args.workers):
-            url_queue.put(None)
-        
         # Setup display - detect subprocess and force simple mode
         display_mode = getattr(self.args, 'display_mode', 'auto')
         
@@ -332,12 +335,13 @@ class RobustTikTokProcessor:
         )
         display_manager.start()
         
-        # Setup Whisper config if needed
+        # Setup Whisper config if transcription is enabled
         whisper_config = None
-        if self.args.whisper:
+        data_collection_config = self.config.get('data_collection', {})
+        if data_collection_config.get('transcription', True):
             from utils.device_manager import DeviceManager
             device_manager = DeviceManager()
-            device = device_manager.get_best_device(force_cpu=self.args.force_cpu)
+            device = device_manager.get_best_device(force_cpu=False)
             whisper_config = {
                 'model_size': getattr(self.args, 'whisper_model', 'small.en'),
                 'device': device.lower(),
@@ -559,7 +563,8 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
                              ms_token: Optional[str],
                              whisper_config: Optional[Dict[str, Any]] = None,
                              shutdown_event: Optional[mp.Event] = None,
-                             config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                             config: Optional[Dict[str, Any]] = None,
+                             context_identifier: Optional[Any] = None) -> Dict[str, Any]:
     """Process a single TikTok URL with consistent flattened output.
     
     Returns:
@@ -580,6 +585,8 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
         enabled_collectors.append('transcription')
     if data_collection_config.get('comments', False):
         enabled_collectors.append('comments')
+    if data_collection_config.get('context_identification', True):
+        enabled_collectors.append('context_identification')
     
     # In recalibrate mode, log what we're doing
     if recalibrate_mode:
@@ -648,14 +655,13 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
             
             # Setup whisper model if needed - check if transcription is enabled
             whisper_model = None
-            use_whisper = 'transcription' in enabled_collectors and download_kwargs.get('use_whisper', False)
+            use_whisper = 'transcription' in enabled_collectors
             
             # Force whisper for transcript recalibration
             if recalibrate_mode and 'transcripts' in recalibrate_components:
                 use_whisper = True
-                args.whisper = True
             
-            if args.whisper and whisper_config and use_whisper:
+            if whisper_config and use_whisper:
                 whisper_model = whisper_config.get('model')
             
             # Check if we only need metadata (no video download)
@@ -714,7 +720,7 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
         if transcript:
             progress.send_progress('transcribing', 100)
             progress.complete_transcription(metadata.get('duration', 0))
-        elif download_kwargs.get('use_whisper', False):
+        elif 'transcription' in enabled_collectors:
             progress.skip_transcription("No audio found")
         else:
             progress.skip_transcription("Whisper not enabled")
@@ -885,6 +891,38 @@ async def process_tiktok_url(url: str, video_extractor: VideoExtractor,
             except Exception as e:
                 progress.send_log(f"Hashtag extraction failed: {e}", 'warning')
         
+        # Context identification if enabled and transcript is available
+        if data_collection_config.get('context_identification', True):
+            progress.send_log(f"Context check: transcript={bool(transcript)}, result_type={type(result)}, has_id={'id' in result if isinstance(result, dict) else False}, identifier={context_identifier is not None}", 'info')
+            if transcript and result and isinstance(result, dict) and 'id' in result:
+                if context_identifier is not None:
+                    try:
+                        progress.start_context()
+                        video_id = result['id']
+                        
+                        # Use the identify_and_save_single method
+                        success = context_identifier.identify_and_save_single(
+                            video_id=video_id,
+                            transcript=transcript,
+                            db_manager=data_manager.manager if hasattr(data_manager, 'manager') else None
+                        )
+                        
+                        if success:
+                            progress.complete_context()
+                        else:
+                            progress.send_log("Context identification failed", 'warning')
+                            
+                    except Exception as e:
+                        progress.report_error('context', str(e))
+                else:
+                    progress.skip_context("Context identifier not initialized")
+            elif not transcript:
+                progress.skip_context("No transcript available")
+            else:
+                progress.skip_context("Missing video data for context identification")
+        else:
+            progress.skip_context("Context identification disabled")
+        
         # OCR extraction removed - no longer supported
         
         progress.complete_saving()
@@ -926,7 +964,8 @@ async def worker_process(worker_id: int, url_queue, result_queue, display_queue,
     video_extractor.shutdown_event = shutdown_event
     
     comment_extractor = None
-    if ms_token:
+    data_collection_config = config.get('data_collection', {})
+    if ms_token and data_collection_config.get('comments', False):
         comment_extractor = CommentExtractor(ms_token=ms_token, max_comments=args.max_comments)
     
     # Initialize data manager for this worker - always use database
@@ -935,7 +974,8 @@ async def worker_process(worker_id: int, url_queue, result_queue, display_queue,
     # Setup Whisper
     whisper_model = None
     whisper_config_with_model = None
-    if args.whisper:
+    data_collection_config = config.get('data_collection', {})
+    if data_collection_config.get('transcription', True):
         progress.send_log('Loading Whisper model...', 'info')
         if whisper_config:
             whisper_model = load_cached_whisper_model(whisper_config)
@@ -945,6 +985,41 @@ async def worker_process(worker_id: int, url_queue, result_queue, display_queue,
                 progress.send_log(f"Loaded Whisper model on {whisper_config.get('device', 'cpu').upper()}", 'success')
             else:
                 progress.send_log('Failed to load Whisper model', 'error')
+    
+    # Setup Context Identifier if enabled
+    context_identifier = None
+    data_collection_config = config.get('data_collection', {}) if config else {}
+    context_enabled = data_collection_config.get('context_identification', True)
+    
+    progress.send_log(f'Context setup: enabled={context_enabled}, available={CONTEXT_IDENTIFICATION_AVAILABLE}', 'info')
+    
+    if not CONTEXT_IDENTIFICATION_AVAILABLE:
+        if context_enabled:
+            progress.send_log('Context identification not available (import failed)', 'warning')
+    elif context_enabled:
+        try:
+            # Create config for context identifier
+            db_config = config.get('database', {})
+            context_config = ContextConfig(
+                db_host=db_config.get('host', 'localhost'),
+                db_port=db_config.get('port', 5432),
+                db_name=db_config.get('database', 'tiktok_scraper'),
+                db_user=db_config.get('user'),
+                db_password=db_config.get('password', ''),
+                model_name='all-MiniLM-L6-v2',  # Fast and efficient model
+                confidence_threshold=0.3
+            )
+            # Initialize with lazy loading to defer model loading until needed
+            progress.send_log(f'Creating context identifier with db_user={context_config.db_user}', 'info')
+            context_identifier = ContextIdentifier(context_config, lazy_load=True)
+            progress.send_log('Context identification enabled', 'info')
+        except Exception as e:
+            import traceback
+            progress.send_log(f'Failed to initialize context identifier: {e}', 'warning')
+            progress.send_log(f'Traceback: {traceback.format_exc()}', 'debug')
+            context_identifier = None
+    else:
+        progress.send_log('Context identification disabled in config', 'info')
     
     progress.send_status('idle')
 
@@ -978,7 +1053,8 @@ async def worker_process(worker_id: int, url_queue, result_queue, display_queue,
                 ms_token=ms_token,
                 whisper_config=whisper_config_with_model,
                 shutdown_event=shutdown_event,
-                config=config
+                config=config,
+                context_identifier=context_identifier
             )
             
             if shutdown_event.is_set():
@@ -1010,6 +1086,8 @@ async def worker_process(worker_id: int, url_queue, result_queue, display_queue,
                 await comment_extractor.cleanup()
             if whisper_model:
                 del whisper_model
+            if context_identifier:
+                context_identifier.cleanup()
         except Exception as e:
             print(f"Worker {worker_id} cleanup error: {e}")
         
@@ -1099,8 +1177,6 @@ def get_cli_provided_args() -> set:
             provided.add('mp3')
         elif arg == '--whisper':
             provided.add('whisper')
-        elif arg == '--force-cpu':
-            provided.add('force_cpu')
         elif arg == '--force-redownload':
             provided.add('force_redownload')
         elif arg == '--clean-progress':
@@ -1185,8 +1261,6 @@ def merge_config_with_args(args, config: Dict[str, Any], cli_provided: set):
         ('download', 'output_dir'): 'output',
         ('download', 'quality'): 'quality',
         ('download', 'audio_only'): 'mp3',
-        ('download', 'use_whisper'): 'whisper',
-        ('download', 'force_cpu'): 'force_cpu',
         
         # Comments settings
         ('comments', 'max_comments'): 'max_comments',
@@ -1254,8 +1328,6 @@ async def main():
                        choices=["best", "worst", "720p", "480p", "360p"],
                        help="Video quality")
     parser.add_argument("--mp3", action="store_true", help="Download audio only as MP3")
-    parser.add_argument("--whisper", action="store_true", help="Use Whisper for transcription")
-    parser.add_argument("--force-cpu", action="store_true", help="Force CPU for Whisper")
     
     # Comment options
     parser.add_argument("--max-comments", type=int, default=10, help="Max comments per video")
@@ -1322,7 +1394,7 @@ async def main():
         
         if not components:
             print("No components available for recalibration.")
-            print("Check config.toml settings (use_whisper, ms_token, etc.)")
+            print("Check config.toml settings (transcription, ms_token, etc.)")
             return
         
         # Get videos needing recalibration
@@ -1343,8 +1415,7 @@ async def main():
         
         # Override some args for recalibration mode
         args.force_redownload = False  # Don't redownload existing videos
-        if 'transcripts' in components:
-            args.whisper = True
+        # Transcription will be handled by data_collection.transcription config
         
         # Process videos (reusing existing infrastructure)
         print(f"\n📊 Processing {len(videos)} videos with {args.workers} worker(s)...")
@@ -1357,7 +1428,6 @@ async def main():
             'output_dir': args.output,
             'quality': args.quality,
             'audio_only': args.mp3,
-            'use_whisper': args.whisper,
             'proxy': args.proxy,
             'recalibrate_mode': True,  # Special flag for recalibration
             'recalibrate_components': components  # Which components to process
@@ -1413,9 +1483,6 @@ async def main():
                     if not ('download' in config and 'audio_only' in config['download']):
                         args.mp3 = True
                         
-                if 'whisper' not in cli_provided:
-                    if not ('download' in config and 'use_whisper' in config['download']):
-                        args.whisper = True
                         
             except Exception as e:
                 print(f"Error connecting to database: {e}")
@@ -1468,10 +1535,15 @@ async def main():
                         if not args.force_redownload:
                             processor.load_existing_progress()
                         
-                        # Get MS_TOKEN
+                        # Get MS_TOKEN - only validate if comments are enabled
+                        data_collection_config = config.get('data_collection', {})
                         if processor.get_ms_token():
-                            if not await processor.validate_ms_token():
-                                print("MS_TOKEN validation failed - continuing without comments")
+                            if data_collection_config.get('comments', False):
+                                if not await processor.validate_ms_token():
+                                    print("MS_TOKEN validation failed - continuing without comments")
+                                    processor.ms_token = None
+                            else:
+                                print("Comment extraction disabled in config - skipping MS_TOKEN validation")
                                 processor.ms_token = None
                         
                         # Prepare download kwargs
@@ -1479,7 +1551,6 @@ async def main():
                             'output_dir': args.output,
                             'quality': args.quality,
                             'audio_only': args.mp3,
-                            'use_whisper': args.whisper,
                             'proxy': args.proxy
                         }
                         
@@ -1603,27 +1674,33 @@ async def main():
     if not args.force_redownload:
         processor.load_existing_progress()
     
-    # Get MS_TOKEN
+    # Get MS_TOKEN - only validate if comments are enabled
+    data_collection_config = config.get('data_collection', {})
     if processor.get_ms_token():
-        if not await processor.validate_ms_token():
-            print("MS_TOKEN validation failed - continuing without comments")
+        if data_collection_config.get('comments', False):
+            if not await processor.validate_ms_token():
+                print("MS_TOKEN validation failed - continuing without comments")
+                processor.ms_token = None
+        else:
+            print("Comment extraction disabled in config - skipping MS_TOKEN validation")
             processor.ms_token = None
     
     # Don't load Whisper model in main process - workers will load their own
-    if args.whisper:
+    data_collection_config = config.get('data_collection', {})
+    if data_collection_config.get('transcription', True):
         from utils.device_manager import DeviceManager
-        device, _ = DeviceManager.get_whisper_device_config(args.force_cpu)
+        device, _ = DeviceManager.get_whisper_device_config(force_cpu=False)
         whisper_device = device.upper()
         print(f"\n✓ Using {args.workers} worker(s) with {whisper_device} acceleration.")
     else:
         whisper_device = "CPU"
+        print(f"\n✓ Using {args.workers} worker(s).")
     
     # Prepare download kwargs
     download_kwargs = {
         'output_dir': args.output,
         'quality': args.quality,
         'audio_only': args.mp3,
-        'use_whisper': args.whisper,
         'proxy': args.proxy
     }
     

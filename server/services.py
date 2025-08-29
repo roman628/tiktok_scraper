@@ -208,7 +208,9 @@ class CollectorService:
         logger.info(f"📊 Current queue: {pending_count} pending URL(s)")
         
         # Build command - force simple display mode for subprocess compatibility
-        cmd = ['python', 'collector.py', '--display-mode', 'simple']
+        # Use venv Python to ensure all dependencies are available
+        venv_python = os.path.join(settings.BASE_DIR, 'venv', 'bin', 'python')
+        cmd = [venv_python, 'collector.py', '--display-mode', 'simple']
         
         # Log full command
         logger.info(f"Command: {' '.join(cmd)}")
