@@ -734,7 +734,7 @@ with open('config.toml', 'rb') as f:
                 
                 if [ ! -z "$GEMINI_API_KEY" ]; then
                     print_msg $YELLOW "\nRunning category discovery..."
-                    python utility/categorize_videos.py --api-key "$GEMINI_API_KEY" 2>&1 | \
+                    python utils/categorize_videos.py --api-key "$GEMINI_API_KEY" 2>&1 | \
                         while IFS= read -r line; do
                             print_msg $CYAN "  $line"
                         done
@@ -764,7 +764,7 @@ with open('config.toml', 'rb') as f:
                 fi
             else
                 print_msg $YELLOW "  ⚠ Skipping category discovery"
-                print_msg $CYAN "  You can run it later with: python utility/categorize_videos.py --api-key YOUR_KEY"
+                print_msg $CYAN "  You can run it later with: python utils/categorize_videos.py --api-key YOUR_KEY"
             fi
         else
             print_msg $YELLOW "  ⚠ No videos with transcripts found for category discovery"

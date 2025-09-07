@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    container_name: tiktok_postgres
+    environment:
+      - POSTGRES_DB=tiktok_scraper
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-tiktok123}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./database/medallion_architecture.sql:/docker-entrypoint-initdb.d/02-medallion.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Django Web Application & Dashboard
+  web:
+    build: .
+    container_name: tiktok_web
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_NAME=tiktok_scraper
+      - DATABASE_USER=${POSTGRES_USER:-postgres}
+      - DATABASE_PASSWORD=${POSTGRES_PASSWORD:-tiktok123}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-your-secret-key-here-change-in-production}
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-True}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-*}
+      - MS_TOKEN=${MS_TOKEN:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    volumes:
+      - ./data:/app/data
+      - ./downloads:/app/downloads
+      - ./logs:/app/logs
+      - ./ml:/app/ml
+      - ./media:/app/media
+      - ./config.toml:/app/config.toml
+    command: >
+      sh -c "
+        python manage.py migrate &&
+        python manage.py runserver 0.0.0.0:8000
+      "
+    restart: unless-stopped
+
+  # Collector Service (run with: docker-compose run collector)
+  collector:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_NAME=tiktok_scraper
+      - DATABASE_USER=${POSTGRES_USER:-postgres}
+      - DATABASE_PASSWORD=${POSTGRES_PASSWORD:-tiktok123}
+      - MS_TOKEN=${MS_TOKEN:-}
+    volumes:
+      - ./data:/app/data
+      - ./downloads:/app/downloads
+      - ./logs:/app/logs
+      - ./config.toml:/app/config.toml
+    command: python collector.py --workers ${COLLECTOR_WORKERS:-4} --whisper --from-file data/urls.txt
+    profiles: ["collector"]
+
+volumes:
+  postgres_data:

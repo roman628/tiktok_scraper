@@ -209,7 +209,7 @@ class ContextIdentifier:
         
         if not categories_data:
             print("Error: No categories found in database")
-            print("Run utility/categorize_videos.py first to discover categories")
+            print("Run utils/categorize_videos.py first to discover categories")
             sys.exit(1)
         
         self.categories = [cat['name'] for cat in categories_data]

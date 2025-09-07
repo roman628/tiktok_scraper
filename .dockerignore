@@ -1,0 +1,91 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Django
+*.log
+*.pot
+*.pyc
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/previews/*
+staticfiles/
+
+# Project specific
+downloads/*
+data/master2.json
+data/*.json
+logs/*
+ml/models/*
+ml/data/*
+*.mp4
+*.mp3
+*.wav
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation
+*.md
+docs/
+README.md
+CLAUDE.md
+
+# Testing
+tests/
+test_*.py
+*.test.py
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Environment
+.env
+.env.*
+*.env
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Serena cache
+.serena/
+
+# Node modules (if any)
+node_modules/
+
+# Database dumps
+*.sql.gz
+*.dump
+*.backup
+
+# Extension build files
+extension/build/
+extension/dist/
