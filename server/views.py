@@ -330,8 +330,25 @@ class CollectorCompleteView(View):
             except Exception as e:
                 logger.warning(f"Could not create CollectorRun record: {e}")
             
-            # Trigger ML training if new data was processed
-            if urls_processed > 0:
+            # Check if auto ML training is enabled in config
+            auto_train_enabled = False
+            try:
+                import tomllib
+                config_path = os.path.join(settings.BASE_DIR, 'config.toml')
+                if os.path.exists(config_path):
+                    with open(config_path, 'rb') as f:
+                        config = tomllib.load(f)
+                        ml_config = config.get('ml', {})
+                        auto_train_enabled = ml_config.get('auto_train_after_collection', False)
+                        
+                    if not auto_train_enabled:
+                        logger.info("ℹ️  ML auto-training is disabled in config.toml")
+                        logger.info("   To enable: set [ml] auto_train_after_collection = true")
+            except Exception as e:
+                logger.warning(f"Could not check auto-training config: {e}")
+            
+            # Trigger ML training if new data was processed AND auto-training is enabled
+            if urls_processed > 0 and auto_train_enabled:
                 try:
                     # Run ML training asynchronously
                     import subprocess
@@ -392,7 +409,8 @@ class CollectorCompleteView(View):
             return JsonResponse({
                 'status': 'acknowledged',
                 'pending_urls': pending_count,
-                'ml_training_triggered': urls_processed > 0
+                'ml_training_triggered': urls_processed > 0 and auto_train_enabled,
+                'ml_auto_train_enabled': auto_train_enabled
             })
         except Exception as e:
             logger.error(f"Error processing collector completion: {e}")

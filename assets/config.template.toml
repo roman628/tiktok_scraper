@@ -130,3 +130,4 @@ min_duration = 45            # Minimum video duration in seconds for training da
 min_words = 150              # Minimum words in transcription to include in training
 min_words_per_second = 2.0   # Minimum speaking rate (filters out music/dance videos)
 filter_reddit_like = true    # Enable filtering to focus on Reddit-style content
+auto_train_after_collection = false  # Automatically start ML training after collector finishes
