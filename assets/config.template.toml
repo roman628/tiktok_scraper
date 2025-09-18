@@ -1,18 +1,6 @@
 # Main Configuration for TikTok Data Collector
 # This file contains all configuration options for the collector.py script
 # Copy this file to config.toml and fill in your settings
-
-[setup]
-# Setup configuration for automated initialization
-# Gemini API key for category discovery (get one free at https://makersuite.google.com/app/apikey)
-gemini_api_key = ""  # Leave empty to skip category discovery or provide key for automatic setup
-
-[tiktok]
-# MS Token for TikTok API access - required for comment extraction
-# Can also be set via MS_TOKEN environment variable
-# To get MS_TOKEN: Open TikTok in browser, open DevTools, find 'msToken' in cookies
-ms_token = "YOUR_MS_TOKEN_HERE"
-
 [input]
 # Default input source (can be overridden by command line)
 default_urls_file = "data/urls.txt"
@@ -100,27 +88,18 @@ context_identification = true  # Identify content categories using AI analysis o
 
 [database]
 # PostgreSQL configuration (recommended over JSON for better performance)
-# Set enabled=true to use PostgreSQL instead of JSON file storage
-enabled = false        # Set to true to use PostgreSQL
-host = "localhost"
-port = 5432
+# Database credentials are set via environment variables:
+# POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_PORT
+enabled = true         # PostgreSQL is now the default storage
+host = "localhost"     # Use "postgres" when running in Docker
+port = 5432           # Default PostgreSQL port
 database = "tiktok_scraper"
-user = "postgres"      # Update with your PostgreSQL username
-password = ""          # Leave empty and use DB_PASSWORD environment variable for security
 min_connections = 2    # Minimum database connections in pool
 max_connections = 10   # Maximum database connections in pool
 
 # Migration settings
 auto_migrate = false   # Automatically migrate existing JSON data to database on startup
 migration_batch_size = 100  # Number of records to migrate at once
-
-# Django-specific database settings
-# These settings are used by the Django server (manage.py runserver)
-# They can be different from the collector.py database settings above
-django_user = "postgres"      # Django database user (use "root" on some servers)
-django_password = ""          # Django database password (leave empty for no password)
-django_host = "localhost"     # Django database host
-django_port = 5432           # Django database port
 
 [ml]
 # Machine Learning model configuration

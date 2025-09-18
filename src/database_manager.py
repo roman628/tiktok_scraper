@@ -44,36 +44,42 @@ class DatabaseManager:
     """Manages PostgreSQL database operations for TikTok scraper"""
     
     def __init__(self, 
-                 host: str = "localhost",
-                 port: int = 5432,
-                 database: str = "tiktok_scraper",
-                 user: str = "postgres",
-                 password: str = "",
-                 min_connections: int = 2,
-                 max_connections: int = 10):
+                 host: str = None,
+                 port: int = None,
+                 database: str = None,
+                 user: str = None,
+                 password: str = None,
+                 min_connections: int = None,
+                 max_connections: int = None):
         """
-        Initialize database manager with connection pooling
+        Initialize database manager with connection pooling.
+        All parameters can be overridden via environment variables.
         
         Args:
-            host: Database host
-            port: Database port
-            database: Database name
-            user: Database user
-            password: Database password
-            min_connections: Minimum connections in pool
-            max_connections: Maximum connections in pool
+            host: Database host (env: DATABASE_HOST)
+            port: Database port (env: DATABASE_PORT)
+            database: Database name (env: DATABASE_NAME)
+            user: Database user (env: DATABASE_USER)
+            password: Database password (env: DATABASE_PASSWORD)
+            min_connections: Minimum connections in pool (env: DATABASE_MIN_CONNECTIONS)
+            max_connections: Maximum connections in pool (env: DATABASE_MAX_CONNECTIONS)
         """
+        # Use environment variables with fallbacks
         self.connection_params = {
-            'host': host,
-            'port': port,
-            'database': database,
-            'user': user,
-            'password': password or os.environ.get('DB_PASSWORD', '')
+            'host': host or os.environ.get('DATABASE_HOST', 'localhost'),
+            'port': port or int(os.environ.get('DATABASE_PORT', '5432')),
+            'database': database or os.environ.get('DATABASE_NAME', 'tiktok_scraper'),
+            'user': user or os.environ.get('DATABASE_USER', 'postgres'),
+            'password': password if password is not None else os.environ.get('DATABASE_PASSWORD', '')
         }
+        
+        # Connection pool settings from environment
+        min_conn = min_connections or int(os.environ.get('DATABASE_MIN_CONNECTIONS', '2'))
+        max_conn = max_connections or int(os.environ.get('DATABASE_MAX_CONNECTIONS', '10'))
         
         # Initialize connection pool
         self.pool = None
-        self._initialize_pool(min_connections, max_connections)
+        self._initialize_pool(min_conn, max_conn)
         
         # Cache for duplicate detection
         self.video_id_cache: Set[str] = set()
@@ -728,11 +734,11 @@ class DatabaseOrJsonManager:
         # Always use database - no longer checking 'enabled' flag
         db_config = config.get('database', {})
         self.manager = DatabaseManager(
-            host=db_config.get('host', 'localhost'),
-            port=db_config.get('port', 5432),
-            database=db_config.get('database', 'tiktok_scraper'),
-            user=db_config.get('user'),  # Use config value, no default
-            password=db_config.get('password', ''),
+            host=os.environ.get('DATABASE_HOST', db_config.get('host', 'localhost')),
+            port=int(os.environ.get('DATABASE_PORT', os.environ.get('POSTGRES_PORT', db_config.get('port', 5432)))),
+            database=os.environ.get('DATABASE_NAME', db_config.get('database', 'tiktok_scraper')),
+            user=os.environ.get('DATABASE_USER', os.environ.get('POSTGRES_USER', db_config.get('user', 'postgres'))),
+            password=os.environ.get('DATABASE_PASSWORD', os.environ.get('POSTGRES_PASSWORD', db_config.get('password', ''))),
             min_connections=db_config.get('min_connections', 2),
             max_connections=db_config.get('max_connections', 10)
         )

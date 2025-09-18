@@ -382,8 +382,13 @@ def main():
     parser = argparse.ArgumentParser(
         description="Discover categories from TikTok videos using Gemini API"
     )
-    parser.add_argument('--api-key', required=True, help='Gemini API key')
+    parser.add_argument('--api-key', help='Gemini API key (defaults to GEMINI_API_KEY env var)')
     args = parser.parse_args()
+    
+    # Get API key from args or environment
+    api_key = args.api_key or os.getenv('GEMINI_API_KEY')
+    if not api_key:
+        parser.error('API key required. Provide --api-key or set GEMINI_API_KEY environment variable')
     
     # Setup logging
     logging.basicConfig(
@@ -393,7 +398,7 @@ def main():
     )
     
     # Create config
-    config = Config(api_key=args.api_key)
+    config = Config(api_key=api_key)
     
     # Run discovery
     try:

@@ -38,7 +38,7 @@ SECRET_KEY = "django-insecure-=n1@702sf071hq912%*gdx3@6st_k0mzd3im!#6)$-url)k5c9
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = ['100.127.122.120', 'localhost', '127.0.0.1']
 
 
 # Application definition
@@ -93,11 +93,11 @@ WSGI_APPLICATION = "tiktok_scraper.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": config.get('database', {}).get('database', 'tiktok_scraper'),
-        "USER": config.get('database', {}).get('django_user', 'postgres'),
-        "PASSWORD": config.get('database', {}).get('django_password', ''),
-        "HOST": config.get('database', {}).get('django_host', 'localhost'),
-        "PORT": str(config.get('database', {}).get('django_port', 5432)),
+        "NAME": os.environ.get('DATABASE_NAME', config.get('database', {}).get('database', 'tiktok_scraper')),
+        "USER": os.environ.get('DATABASE_USER', os.environ.get('POSTGRES_USER', config.get('database', {}).get('user', 'postgres'))),
+        "PASSWORD": os.environ.get('DATABASE_PASSWORD', os.environ.get('POSTGRES_PASSWORD', config.get('database', {}).get('password', ''))),
+        "HOST": os.environ.get('DATABASE_HOST', config.get('database', {}).get('host', 'localhost')),
+        "PORT": str(os.environ.get('DATABASE_PORT', os.environ.get('POSTGRES_PORT', config.get('database', {}).get('port', 5432)))),
     }
 }
 
@@ -147,6 +147,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:8000",
     "http://127.0.0.1:8000",
+    "http://100.127.122.120:8000",
 ]
 
 CORS_ALLOW_ALL_ORIGINS = True  # For development only

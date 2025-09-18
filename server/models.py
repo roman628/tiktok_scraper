@@ -136,6 +136,23 @@ class MLTrainingRun(models.Model):
         return r2_points + mae_points + rmse_points
 
 
+class CollectorStatus(models.Model):
+    """Legacy collector status table - kept for compatibility"""
+    id = models.IntegerField(primary_key=True, default=1)
+    status = models.CharField(max_length=20, default='stopped')
+    started_at = models.DateTimeField(null=True, blank=True)
+    stopped_at = models.DateTimeField(null=True, blank=True)
+    last_activity = models.DateTimeField(auto_now=True)
+    urls_processed = models.IntegerField(default=0)
+    pid = models.IntegerField(null=True, blank=True)
+    
+    class Meta:
+        db_table = 'collector_status'
+        
+    def __str__(self):
+        return f"Collector Status: {self.status}"
+
+
 class Transcription(models.Model):
     """Django model for transcriptions table"""
     id = models.AutoField(primary_key=True)

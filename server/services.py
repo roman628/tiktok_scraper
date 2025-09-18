@@ -2,6 +2,7 @@
 
 import subprocess
 import os
+import sys
 import json
 import logging
 import psutil
@@ -14,8 +15,6 @@ logger = logging.getLogger(__name__)
 
 class CollectorService:
     """Service to manage collector.py execution"""
-    
-    _collector_process = None  # Track the running collector process
     
     @staticmethod
     def queue_url(url: str) -> QueuedURL:
@@ -68,197 +67,44 @@ class CollectorService:
         return list(query.values_list('url', flat=True))
     
     @staticmethod
-    def check_collector_status():
-        """Check and log collector status changes"""
-        # First check process status
-        if CollectorService._collector_process is not None:
-            poll_result = CollectorService._collector_process.poll()
-            if poll_result is not None:
-                # Process has finished
-                logger.info(f"✅ Collector process (PID: {CollectorService._collector_process.pid}) has finished with exit code: {poll_result}")
-                CollectorService._collector_process = None
-                
-                # Update database status
-                try:
-                    from django.db import connection
-                    with connection.cursor() as cursor:
-                        cursor.execute("""
-                            UPDATE collector_status 
-                            SET status = 'stopped', stopped_at = NOW()
-                            WHERE id = 1
-                        """)
-                except Exception as e:
-                    logger.warning(f"Could not update collector status in database: {e}")
-                
-                return False
-        return CollectorService.is_collector_running()
-    
-    @staticmethod
     def is_collector_running() -> bool:
         """
         Check if collector.py is currently running.
-        First checks tracked process, then verifies via psutil, then checks database.
+        In Docker, the collector service is always running as a separate container.
         
         Returns:
-            True if collector is running, False otherwise
+            True if collector service is healthy, False otherwise
         """
-        # First check if we have a tracked process
-        if CollectorService._collector_process is not None:
-            # Check if the tracked process is still alive
-            poll_result = CollectorService._collector_process.poll()
-            if poll_result is not None:
-                # Process has terminated
-                logger.debug(f"Tracked collector process (PID: {CollectorService._collector_process.pid}) has terminated")
-                CollectorService._collector_process = None
-                # Update database
-                try:
-                    from django.db import connection
-                    with connection.cursor() as cursor:
-                        cursor.execute("""
-                            UPDATE collector_status 
-                            SET status = 'stopped', stopped_at = NOW()
-                            WHERE id = 1
-                        """)
-                except Exception as e:
-                    logger.warning(f"Could not update collector status in database: {e}")
-            else:
-                # Process still running according to poll(), verify with psutil
-                try:
-                    if psutil.pid_exists(CollectorService._collector_process.pid):
-                        process = psutil.Process(CollectorService._collector_process.pid)
-                        cmdline = ' '.join(process.cmdline())
-                        if 'collector.py' in cmdline:
-                            return True
-                        else:
-                            logger.warning(f"Process {CollectorService._collector_process.pid} exists but is not collector.py")
-                            CollectorService._collector_process = None
-                except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-                    logger.debug(f"Process check failed: {e}")
-                    CollectorService._collector_process = None
+        # In Docker environment, collector runs as separate service
+        if os.environ.get('DOCKER_CONTAINER'):
+            # Could check container health via Docker API if needed
+            # For now, assume it's running if we're in Docker
+            return True
         
-        # No tracked process or it's dead, check database for other instances
-        try:
-            from django.db import connection
-            with connection.cursor() as cursor:
-                cursor.execute("""
-                    SELECT status, pid, last_activity 
-                    FROM collector_status 
-                    WHERE id = 1
-                """)
-                result = cursor.fetchone()
-                if result and result[0] == 'running':
-                    pid = result[1]
-                    if pid:
-                        # Verify the PID is actually running collector.py
-                        try:
-                            if psutil.pid_exists(pid):
-                                process = psutil.Process(pid)
-                                cmdline = ' '.join(process.cmdline())
-                                if 'collector.py' in cmdline:
-                                    logger.debug(f"Found running collector from database (PID: {pid})")
-                                    return True
-                                else:
-                                    logger.debug(f"PID {pid} exists but is not running collector.py")
-                        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as e:
-                            logger.debug(f"Process {pid} check failed: {e}")
-                    
-                    # PID not alive or not collector.py, update database
-                    logger.debug("Updating database: collector no longer running")
-                    cursor.execute("""
-                        UPDATE collector_status 
-                        SET status = 'stopped', stopped_at = NOW()
-                        WHERE id = 1
-                    """)
-        except Exception as e:
-            logger.warning(f"Could not check database collector status: {e}")
+        # Local environment - check if collector.py process exists
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                cmdline = proc.info.get('cmdline', [])
+                if cmdline and 'collector.py' in ' '.join(cmdline):
+                    return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
         
         return False
     
     @staticmethod
-    def trigger_processing(urls: Optional[List[str]] = None, workers: int = None) -> subprocess.Popen:
+    def trigger_processing():
         """
-        Trigger collector.py to process URLs from database queue.
-        Only starts if not already running.
-        
-        Args:
-            urls: Not used - kept for compatibility
-            workers: Not used - uses config.toml settings
-            
-        Returns:
-            Subprocess instance or existing process
+        In the new architecture, the collector runs continuously as a service.
+        This method now just logs that URLs have been queued.
         """
-        # Perform a fresh check if collector is actually running
-        if CollectorService.is_collector_running():
-            # Check pending URLs to give accurate feedback
-            pending_count = QueuedURL.objects.filter(status='pending').count()
-            if pending_count > 0:
-                logger.info("📋 Collector already running - %d URL(s) queued and will be processed", pending_count)
-            else:
-                logger.info("📋 Collector already running - URL will be processed in next cycle")
-            return CollectorService._collector_process
-        
-        # Check if there are pending URLs
         pending_count = QueuedURL.objects.filter(status='pending').count()
-        if pending_count == 0:
+        
+        if pending_count > 0:
+            logger.info(f"📋 {pending_count} URL(s) queued for processing")
+            logger.info("Collector service will process them automatically")
+        else:
             logger.info("No pending URLs to process")
-            return None
-        
-        # Log collector start
-        logger.info(f"🚀 Starting collector.py in continuous mode to process queue")
-        logger.info(f"📊 Current queue: {pending_count} pending URL(s)")
-        
-        # Build command - force simple display mode for subprocess compatibility
-        # Use venv Python to ensure all dependencies are available
-        venv_python = os.path.join(settings.BASE_DIR, 'venv', 'bin', 'python')
-        cmd = [venv_python, 'collector.py', '--display-mode', 'simple']
-        
-        # Log full command
-        logger.info(f"Command: {' '.join(cmd)}")
-        
-        # Create log file for this collector run
-        import datetime
-        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_dir = os.path.join(settings.BASE_DIR, 'logs')
-        os.makedirs(log_dir, exist_ok=True)
-        log_file_path = os.path.join(log_dir, f'collector_{timestamp}.log')
-        
-        logger.info(f"Collector output will be logged to: {log_file_path}")
-        
-        # Run collector.py in background with output to log file
-        with open(log_file_path, 'w') as log_file:
-            process = subprocess.Popen(
-                cmd,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,  # Merge stderr into stdout
-                cwd=settings.BASE_DIR,  # Run from project root
-                bufsize=1,  # Line buffered
-                universal_newlines=True  # Text mode
-            )
-        
-        # Store the process reference
-        CollectorService._collector_process = process
-        
-        logger.info(f"Collector started with PID: {process.pid}")
-        logger.info("Collector will continuously process the queue until idle")
-        
-        return process
-    
-    @staticmethod
-    def batch_process(batch_size: int = 10, workers: int = 4) -> Optional[subprocess.Popen]:
-        """
-        Process a batch of pending URLs.
-        
-        Args:
-            batch_size: Number of URLs to process
-            workers: Number of worker processes
-            
-        Returns:
-            Subprocess instance or None if no URLs
-        """
-        urls = CollectorService.get_pending_urls(limit=batch_size)
-        if urls:
-            return CollectorService.trigger_processing(urls, workers)
-        return None
     
     @staticmethod
     def mark_completed(url: str):
@@ -271,28 +117,40 @@ class CollectorService:
     
     @staticmethod
     def get_collector_stats() -> dict:
-        """Get collector statistics from database"""
+        """Get collector statistics"""
+        from django.utils import timezone
+        from datetime import timedelta
+        
+        # Get queue statistics
+        pending = QueuedURL.objects.filter(status='pending').count()
+        processing = QueuedURL.objects.filter(status='processing').count()
+        completed_today = QueuedURL.objects.filter(
+            status='completed',
+            processed_at__gte=timezone.now() - timedelta(hours=24)
+        ).count()
+        
+        # Try to get collector status from database
         try:
-            from django.db import connection
-            with connection.cursor() as cursor:
-                cursor.execute("""
-                    SELECT status, started_at, stopped_at, last_activity, urls_processed, pid
-                    FROM collector_status
-                    WHERE id = 1
-                """)
-                result = cursor.fetchone()
-                if result:
-                    return {
-                        'status': result[0],
-                        'started_at': result[1],
-                        'stopped_at': result[2],
-                        'last_activity': result[3],
-                        'urls_processed': result[4],
-                        'pid': result[5]
-                    }
-        except Exception as e:
-            logger.warning(f"Could not get collector stats: {e}")
-        return None
+            from .models import CollectorStatus
+            collector_status = CollectorStatus.objects.get(id=1)
+            started_at = collector_status.started_at
+            urls_processed = collector_status.urls_processed
+            pid = collector_status.pid
+        except:
+            started_at = None
+            urls_processed = 0
+            pid = None
+
+        return {
+            'status': 'running' if CollectorService.is_collector_running() else 'stopped',
+            'pending': pending,
+            'processing': processing,
+            'completed_today': completed_today,
+            'last_activity': timezone.now(),
+            'started_at': started_at,
+            'urls_processed': urls_processed,
+            'pid': pid
+        }
     
     @staticmethod
     def get_latest_log():

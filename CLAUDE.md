@@ -452,3 +452,52 @@ The `enhanced_worker_process` is the primary worker implementation that includes
 2. **Transcription interrupted**: Check that sentinel values aren't added to queue too early
 3. **Workers exit prematurely**: Verify `detect_completion` logic checks for pending URLs in database
 4. **Context identification skipped**: Ensure transcript is available and not empty
+- under no circumstances should we ever do a 'CPU only' approach
+
+## Docker Service Architecture (Simplified 2025-09-12)
+
+### Overview
+System uses **separate Docker containers** for each service, avoiding subprocess complexity:
+- **postgres**: PostgreSQL database (port 5432)
+- **web**: Django API and dashboard (port 8000)
+- **collector**: Continuous URL processor (uses database queue)
+
+### Architecture Benefits
+- **Simple**: Each container does one thing well
+- **Reliable**: Containers restart automatically if they crash
+- **Scalable**: Adjust `COLLECTOR_WORKERS` env var for parallel processing
+- **Observable**: Standard Docker logs for monitoring
+- **Resource Efficient**: Collector only runs when URLs are pending
+
+### How It Works
+1. Extension adds URL → Saved to `queued_urls` table
+2. Django API logs the queue status
+3. Collector service polls database every few seconds
+4. When URLs found → Processes with configured workers
+5. Updates database → Continues polling
+
+### Docker Commands
+```bash
+# Start all services
+docker-compose up -d
+
+# Monitor collector in real-time
+docker-compose logs -f collector
+
+# Scale collector workers (via environment)
+COLLECTOR_WORKERS=8 docker-compose up -d collector
+
+# Restart collector if needed
+docker-compose restart collector
+
+# Check service health
+docker-compose ps
+```
+
+### Key Configuration
+The collector service in `docker-compose.yml`:
+- Runs continuously with `--from-queue` flag
+- Uses `COLLECTOR_WORKERS` environment variable
+- Connects to PostgreSQL for queue management
+- Has GPU access for transcription/OCR
+- Restarts automatically on failure

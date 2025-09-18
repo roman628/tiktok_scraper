@@ -4,6 +4,7 @@ Worker Manager - Robust worker lifecycle and heartbeat management
 import time
 import multiprocessing as mp
 import queue
+import os
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 import psycopg2
@@ -30,10 +31,11 @@ class WorkerManager:
     def get_db_connection(self):
         """Get database connection"""
         return psycopg2.connect(
-            host=self.db_config.get('host', 'localhost'),
-            database=self.db_config.get('database', 'tiktok_scraper'),
-            user=self.db_config.get('user'),
-            password=self.db_config.get('password', ''),
+            host=os.environ.get('DATABASE_HOST', self.db_config.get('host', 'localhost')),
+            database=os.environ.get('DATABASE_NAME', self.db_config.get('database', 'tiktok_scraper')),
+            user=os.environ.get('DATABASE_USER', os.environ.get('POSTGRES_USER', self.db_config.get('user', 'postgres'))),
+            password=os.environ.get('DATABASE_PASSWORD', os.environ.get('POSTGRES_PASSWORD', self.db_config.get('password', ''))),
+            port=int(os.environ.get('DATABASE_PORT', os.environ.get('POSTGRES_PORT', self.db_config.get('port', 5432)))),
             cursor_factory=RealDictCursor
         )
     
@@ -428,13 +430,14 @@ async def async_enhanced_worker(
         elif context_enabled:
             try:
                 # Create config for context identifier
+                # Use environment variables first, then config, then defaults
                 db_config = config.get('database', {})
                 context_config = ContextConfig(
-                    db_host=db_config.get('host', 'localhost'),
-                    db_port=db_config.get('port', 5432),
-                    db_name=db_config.get('database', 'tiktok_scraper'),
-                    db_user=db_config.get('user'),
-                    db_password=db_config.get('password', ''),
+                    db_host=os.environ.get('DATABASE_HOST', db_config.get('host', 'localhost')),
+                    db_port=int(os.environ.get('DATABASE_PORT', db_config.get('port', 5432))),
+                    db_name=os.environ.get('DATABASE_NAME', db_config.get('database', 'tiktok_scraper')),
+                    db_user=os.environ.get('DATABASE_USER', db_config.get('user', 'postgres')),
+                    db_password=os.environ.get('DATABASE_PASSWORD', db_config.get('password', '')),
                     model_name='all-MiniLM-L6-v2',  # Fast and efficient model
                     confidence_threshold=0.3
                 )
@@ -493,10 +496,11 @@ async def async_enhanced_worker(
             try:
                 import psycopg2
                 conn = psycopg2.connect(
-                    host=config.get('database', {}).get('host', 'localhost'),
-                    database=config.get('database', {}).get('database', 'tiktok_scraper'),
-                    user=config.get('database', {}).get('user'),
-                    password=config.get('database', {}).get('password', '')
+                    host=os.environ.get('DATABASE_HOST', config.get('database', {}).get('host', 'localhost')),
+                    database=os.environ.get('DATABASE_NAME', config.get('database', {}).get('database', 'tiktok_scraper')),
+                    user=os.environ.get('DATABASE_USER', os.environ.get('POSTGRES_USER', config.get('database', {}).get('user', 'postgres'))),
+                    password=os.environ.get('DATABASE_PASSWORD', os.environ.get('POSTGRES_PASSWORD', config.get('database', {}).get('password', ''))),
+                    port=int(os.environ.get('DATABASE_PORT', os.environ.get('POSTGRES_PORT', config.get('database', {}).get('port', 5432))))
                 )
                 with conn.cursor() as cur:
                     cur.execute("""
@@ -551,10 +555,11 @@ async def async_enhanced_worker(
                     try:
                         import psycopg2
                         conn = psycopg2.connect(
-                            host=config.get('database', {}).get('host', 'localhost'),
-                            database=config.get('database', {}).get('database', 'tiktok_scraper'),
-                            user=config.get('database', {}).get('user'),
-                            password=config.get('database', {}).get('password', '')
+                            host=os.environ.get('DATABASE_HOST', config.get('database', {}).get('host', 'localhost')),
+                            database=os.environ.get('DATABASE_NAME', config.get('database', {}).get('database', 'tiktok_scraper')),
+                            user=os.environ.get('DATABASE_USER', os.environ.get('POSTGRES_USER', config.get('database', {}).get('user', 'postgres'))),
+                            password=os.environ.get('DATABASE_PASSWORD', os.environ.get('POSTGRES_PASSWORD', config.get('database', {}).get('password', ''))),
+                            port=int(os.environ.get('DATABASE_PORT', os.environ.get('POSTGRES_PORT', config.get('database', {}).get('port', 5432))))
                         )
                         with conn.cursor() as cur:
                             cur.execute("""
@@ -572,10 +577,11 @@ async def async_enhanced_worker(
                     try:
                         import psycopg2
                         conn = psycopg2.connect(
-                            host=config.get('database', {}).get('host', 'localhost'),
-                            database=config.get('database', {}).get('database', 'tiktok_scraper'),
-                            user=config.get('database', {}).get('user'),
-                            password=config.get('database', {}).get('password', '')
+                            host=os.environ.get('DATABASE_HOST', config.get('database', {}).get('host', 'localhost')),
+                            database=os.environ.get('DATABASE_NAME', config.get('database', {}).get('database', 'tiktok_scraper')),
+                            user=os.environ.get('DATABASE_USER', os.environ.get('POSTGRES_USER', config.get('database', {}).get('user', 'postgres'))),
+                            password=os.environ.get('DATABASE_PASSWORD', os.environ.get('POSTGRES_PASSWORD', config.get('database', {}).get('password', ''))),
+                            port=int(os.environ.get('DATABASE_PORT', os.environ.get('POSTGRES_PORT', config.get('database', {}).get('port', 5432))))
                         )
                         with conn.cursor() as cur:
                             cur.execute("""
@@ -601,10 +607,11 @@ async def async_enhanced_worker(
                 try:
                     import psycopg2
                     conn = psycopg2.connect(
-                        host=config.get('database', {}).get('host', 'localhost'),
-                        database=config.get('database', {}).get('database', 'tiktok_scraper'),
-                        user=config.get('database', {}).get('user'),
-                        password=config.get('database', {}).get('password', '')
+                        host=os.environ.get('DATABASE_HOST', config.get('database', {}).get('host', 'localhost')),
+                        database=os.environ.get('DATABASE_NAME', config.get('database', {}).get('database', 'tiktok_scraper')),
+                        user=os.environ.get('DATABASE_USER', os.environ.get('POSTGRES_USER', config.get('database', {}).get('user', 'postgres'))),
+                        password=os.environ.get('DATABASE_PASSWORD', os.environ.get('POSTGRES_PASSWORD', config.get('database', {}).get('password', ''))),
+                        port=int(os.environ.get('DATABASE_PORT', os.environ.get('POSTGRES_PORT', config.get('database', {}).get('port', 5432))))
                     )
                     with conn.cursor() as cur:
                         cur.execute("""

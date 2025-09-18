@@ -109,8 +109,6 @@ CREATE INDEX IF NOT EXISTS idx_videos_uploader_id ON videos(uploader_id);
 CREATE INDEX IF NOT EXISTS idx_videos_upload_date ON videos(upload_date);
 CREATE INDEX IF NOT EXISTS idx_videos_track_name ON videos(track_name);
 CREATE INDEX IF NOT EXISTS idx_videos_track_artist ON videos(track_artist);
-CREATE INDEX IF NOT EXISTS idx_videos_upload_hour ON videos(upload_hour);
-CREATE INDEX IF NOT EXISTS idx_videos_has_text_overlay ON videos(has_text_overlay);
 
 CREATE INDEX IF NOT EXISTS idx_comments_video_id ON comments(video_id);
 CREATE INDEX IF NOT EXISTS idx_comments_username ON comments(username);

@@ -1451,44 +1451,34 @@ async def main():
         # Check database queue for pending URLs
         from src.database_manager import DatabaseManager
         
-        db_config = config.get('database', {})
-        if db_config.get('enabled', True):
-            try:
-                db = DatabaseManager(
-                    host=db_config.get('host', 'localhost'),
-                    database=db_config.get('database', 'tiktok_scraper'),
-                    user=db_config.get('user'),  # Use config value, no default
-                    password=db_config.get('password', ''),
-                    port=db_config.get('port', 5432)
-                )
-                database_mode = True
-                
-                # Clear args.from_file to prevent conflict with database mode
-                args.from_file = None
-                args.url = None
-                
-                # Mark collector as running in database
-                with db.get_cursor() as cursor:
-                    cursor.execute("""
-                        INSERT INTO collector_status (status, started_at, pid)
-                        VALUES ('running', NOW(), %s)
-                        ON CONFLICT (id) DO UPDATE
-                        SET status = 'running', started_at = NOW(), pid = %s
-                        WHERE collector_status.id = 1
-                    """, (os.getpid(), os.getpid()))
-                    cursor.connection.commit()
-                
-                # Apply defaults if not in config
-                if 'mp3' not in cli_provided:
-                    if not ('download' in config and 'audio_only' in config['download']):
-                        args.mp3 = True
-                        
-                        
-            except Exception as e:
-                print(f"Error connecting to database: {e}")
-                return
-        else:
-            print("Database is disabled in config.toml")
+        # Database is always enabled now, environment variables take precedence
+        # The DatabaseManager will use environment variables automatically
+        try:
+            db = DatabaseManager()  # Will use environment variables by default
+            database_mode = True
+
+            # Clear args.from_file to prevent conflict with database mode
+            args.from_file = None
+            args.url = None
+
+            # Mark collector as running in database
+            with db.get_cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO collector_status (status, started_at, pid)
+                    VALUES ('running', NOW(), %s)
+                    ON CONFLICT (id) DO UPDATE
+                    SET status = 'running', started_at = NOW(), pid = %s
+                    WHERE collector_status.id = 1
+                """, (os.getpid(), os.getpid()))
+                cursor.connection.commit()
+
+            # Apply defaults if not in config
+            if 'mp3' not in cli_provided:
+                if not ('download' in config and 'audio_only' in config['download']):
+                    args.mp3 = True
+
+        except Exception as e:
+            print(f"Error connecting to database: {e}")
             return
     
     # Database continuous processing loop
@@ -1739,36 +1729,29 @@ async def main():
         
         # Update URL statuses in database queue if we're using it
         if 'url' not in cli_provided and 'from_file' not in cli_provided:
-            db_config = config.get('database', {})
-            if db_config.get('enabled', True):
-                try:
-                    db = DatabaseManager(
-                        host=db_config.get('host', 'localhost'),
-                        database=db_config.get('database', 'tiktok_scraper'),
-                        user=db_config.get('user'),  # Use config value, no default
-                        password=db_config.get('password', ''),
-                        port=db_config.get('port', 5432)
-                    )
-                    
-                    # Mark processed URLs as completed
-                    with db.get_cursor() as cursor:
-                        for url in urls:
-                            if url not in processor.state.failed_urls:
-                                cursor.execute("""
-                                    UPDATE queued_urls 
-                                    SET status = 'completed', processed_at = NOW()
-                                    WHERE url = %s
-                                """, (url,))
-                            else:
-                                cursor.execute("""
-                                    UPDATE queued_urls 
-                                    SET status = 'failed', error_message = 'Processing failed'
-                                    WHERE url = %s
-                                """, (url,))
-                        cursor.connection.commit()
-                        print(f"✅ Updated database queue status for {len(urls)} URL(s)")
-                except Exception as e:
-                    print(f"Warning: Could not update database queue status: {e}")
+            # Database is always enabled, uses environment variables
+            try:
+                db = DatabaseManager()  # Will use environment variables by default
+                
+                # Mark processed URLs as completed
+                with db.get_cursor() as cursor:
+                    for url in urls:
+                        if url not in processor.state.failed_urls:
+                            cursor.execute("""
+                                UPDATE queued_urls
+                                SET status = 'completed', processed_at = NOW()
+                                WHERE url = %s
+                            """, (url,))
+                        else:
+                            cursor.execute("""
+                                UPDATE queued_urls
+                                SET status = 'failed', error_message = 'Processing failed'
+                                WHERE url = %s
+                            """, (url,))
+                    cursor.connection.commit()
+                print(f"✅ Updated database queue status for {len(urls)} URL(s)")
+            except Exception as e:
+                print(f"Warning: Could not update database queue status: {e}")
         
         # Clean up
         # Legacy auto-clean removed - using database now
