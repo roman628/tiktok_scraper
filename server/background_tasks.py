@@ -119,8 +119,26 @@ class BackgroundTaskManager:
                 self.collector_process = None
                 return True
 
+            collector_pid = self.collector_process.pid
+
+            # First, try to find and terminate any worker processes
+            try:
+                import psutil
+                parent = psutil.Process(collector_pid)
+                children = parent.children(recursive=True)
+
+                if children:
+                    logger.info(f"Found {len(children)} child worker processes to terminate")
+                    for child in children:
+                        try:
+                            child.terminate()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+            except Exception as e:
+                logger.warning(f"Could not check for child processes: {e}")
+
             # Send SIGTERM for graceful shutdown
-            logger.info(f"Stopping collector PID: {self.collector_process.pid}")
+            logger.info(f"Stopping collector PID: {collector_pid}")
             self.collector_process.terminate()
 
             # Wait up to 10 seconds for process to terminate
@@ -130,6 +148,21 @@ class BackgroundTaskManager:
             except subprocess.TimeoutExpired:
                 # Force kill if not terminated
                 logger.warning("Collector didn't stop gracefully, forcing kill")
+
+                # Kill any remaining child processes first
+                try:
+                    import psutil
+                    parent = psutil.Process(collector_pid)
+                    children = parent.children(recursive=True)
+                    for child in children:
+                        try:
+                            child.kill()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                except:
+                    pass
+
+                # Then kill the parent
                 self.collector_process.kill()
                 self.collector_process.wait()
 
