@@ -52,6 +52,9 @@ uvicorn[standard]>=0.15.0
 # System monitoring and performance
 psutil>=5.9.0
 
+# Container management
+docker>=6.0.0  # For Docker container control
+
 # Computer Vision & Video Processing
 opencv-python>=4.8.0
 easyocr>=1.7.0

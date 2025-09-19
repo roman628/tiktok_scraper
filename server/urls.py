@@ -4,6 +4,7 @@ from . import views
 urlpatterns = [
     # Dashboard
     path('dashboard/', views.dashboard_view, name='dashboard'),
+    path('', views.dashboard_view, name='home'),
     
     # URL submission endpoints (replaces url_server.py)
     path('api/submit-url/', views.URLSubmitView.as_view(), name='submit-url'),
@@ -33,4 +34,23 @@ urlpatterns = [
     # ML metrics endpoints
     path('api/ml/metrics/', views.MLMetricsView.as_view(), name='ml-metrics'),
     path('api/ml/history/', views.MLHistoryView.as_view(), name='ml-history'),
+
+    # Config management endpoints
+    path('api/config/', views.ConfigView.as_view(), name='config-get'),
+    path('api/config/update/', views.ConfigUpdateView.as_view(), name='config-update'),
+    path('api/config/validate/', views.ConfigValidateView.as_view(), name='config-validate'),
+
+    # Service control endpoints
+    path('api/services/collector/start/', views.CollectorStartView.as_view(), name='collector-start'),
+    path('api/services/collector/stop/', views.CollectorStopView.as_view(), name='collector-stop'),
+    path('api/services/collector/restart/', views.CollectorRestartView.as_view(), name='collector-restart'),
+    path('api/services/collector/status/', views.CollectorStatusView.as_view(), name='collector-status'),
+
+    path('api/services/ml/start/', views.MLServiceStartView.as_view(), name='ml-service-start'),
+    path('api/services/ml/stop/', views.MLServiceStopView.as_view(), name='ml-service-stop'),
+    path('api/services/ml/status/', views.MLServiceStatusView.as_view(), name='ml-service-status'),
+
+    # Container management endpoints (for Docker)
+    path('api/services/container/status/', views.ContainerStatusView.as_view(), name='container-status'),
+    path('api/services/container/scale/', views.ContainerScaleView.as_view(), name='container-scale'),
 ]

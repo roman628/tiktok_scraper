@@ -12,6 +12,16 @@ import logging
 import os
 import subprocess
 from datetime import datetime
+import toml
+import signal
+import time
+
+# Optional Docker import - won't break if not installed
+try:
+    import docker
+    DOCKER_AVAILABLE = True
+except ImportError:
+    DOCKER_AVAILABLE = False
 
 from .models import QueuedURL, Video, CollectorRun, MLTrainingRun
 from .services import CollectorService, MLService
@@ -616,9 +626,15 @@ class MLHistoryView(APIView):
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-def dashboard_view(request):
+def dashboard_enhanced_view(request):
+    """Enhanced dashboard with settings and service controls"""
+    # Reuse same context as original dashboard
+    return dashboard_view(request, template='dashboard.html')
+
+
+def dashboard_view(request, template='dashboard.html'):
     """Dashboard view showing database statistics"""
-    
+
     # Check if collector is running
     collector_running = False
     try:
@@ -627,7 +643,7 @@ def dashboard_view(request):
         collector_running = bool(result.stdout.strip())
     except:
         pass
-    
+
     # Get last collector run from database or Django model
     last_collector_date = None
     last_run_urls_processed = 0
@@ -637,7 +653,7 @@ def dashboard_view(request):
         if last_runs:
             last_collector_run = last_runs[0]
             last_collector_date = last_collector_run.ended_at
-            
+
             # Calculate URLs processed in the last run (difference from previous)
             if len(last_runs) > 1:
                 previous_run = last_runs[1]
@@ -650,7 +666,7 @@ def dashboard_view(request):
             from django.db import connection
             with connection.cursor() as cursor:
                 cursor.execute("""
-                    SELECT stopped_at FROM collector_status 
+                    SELECT stopped_at FROM collector_status
                     WHERE id = 1 AND stopped_at IS NOT NULL
                 """)
                 result = cursor.fetchone()
@@ -658,7 +674,7 @@ def dashboard_view(request):
                     last_collector_date = result[0]
     except Exception as e:
         logger.debug(f"Could not get last collector run: {e}")
-    
+
     # Get last ML training run
     last_ml_date = None
     try:
@@ -675,21 +691,21 @@ def dashboard_view(request):
                 last_ml_date = datetime.fromtimestamp(os.path.getmtime(model_path))
     except Exception as e:
         logger.debug(f"Could not get last ML run: {e}")
-    
+
     # Get video count
     video_count = Video.objects.count()
-    
+
     # Get URL count
     url_count = QueuedURL.objects.count()
-    
+
     # Get additional statistics
     pending_urls = QueuedURL.objects.filter(status='pending').count()
     completed_urls = QueuedURL.objects.filter(status='completed').count()
     failed_urls = QueuedURL.objects.filter(status='failed').count()
-    
+
     # Get recent videos
     recent_videos = Video.objects.order_by('-downloaded_at')[:10]
-    
+
     context = {
         'collector_running': collector_running,
         'last_collector_date': last_collector_date,
@@ -702,5 +718,492 @@ def dashboard_view(request):
         'failed_urls': failed_urls,
         'recent_videos': recent_videos,
     }
-    
-    return render(request, 'dashboard.html', context)
+
+    return render(request, template, context)
+
+
+# Config Management Views
+class ConfigView(APIView):
+    """Get current configuration"""
+
+    def get(self, request):
+        """Return current config.toml as JSON"""
+        try:
+            config_path = os.path.join(settings.BASE_DIR, 'config.toml')
+
+            if not os.path.exists(config_path):
+                return Response({
+                    'error': 'config.toml not found'
+                }, status=status.HTTP_404_NOT_FOUND)
+
+            with open(config_path, 'rb') as f:
+                try:
+                    import tomllib
+                except ImportError:
+                    import tomli as tomllib
+                config = tomllib.load(f)
+
+            # Get template for defaults and structure
+            template_path = os.path.join(settings.BASE_DIR, 'assets', 'config.template.toml')
+            template = {}
+            if os.path.exists(template_path):
+                with open(template_path, 'rb') as f:
+                    template = tomllib.load(f)
+
+            return Response({
+                'config': config,
+                'template': template,
+                'sections': list(config.keys())
+            })
+
+        except Exception as e:
+            logger.error(f"Error reading config: {e}")
+            return Response({
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ConfigUpdateView(APIView):
+    """Update configuration"""
+
+    def post(self, request):
+        """Update config.toml with new values"""
+        try:
+            section = request.data.get('section')
+            key = request.data.get('key')
+            value = request.data.get('value')
+
+            if not section or not key:
+                return Response({
+                    'error': 'section and key are required'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            config_path = os.path.join(settings.BASE_DIR, 'config.toml')
+
+            # Read existing config
+            with open(config_path, 'rb') as f:
+                try:
+                    import tomllib
+                except ImportError:
+                    import tomli as tomllib
+                config = tomllib.load(f)
+
+            # Update value
+            if section not in config:
+                config[section] = {}
+            config[section][key] = value
+
+            # Write back
+            with open(config_path, 'w') as f:
+                toml.dump(config, f)
+
+            logger.info(f"Config updated: [{section}] {key} = {value}")
+
+            return Response({
+                'success': True,
+                'message': f'Updated [{section}] {key}',
+                'config': config
+            })
+
+        except Exception as e:
+            logger.error(f"Error updating config: {e}")
+            return Response({
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ConfigValidateView(APIView):
+    """Validate configuration values"""
+
+    def post(self, request):
+        """Validate config values before saving"""
+        try:
+            section = request.data.get('section')
+            key = request.data.get('key')
+            value = request.data.get('value')
+
+            # Validation rules
+            validation_rules = {
+                'processing': {
+                    'workers': lambda v: 1 <= v <= 32,
+                    'batch_size': lambda v: 1 <= v <= 100,
+                    'delay': lambda v: v >= 0
+                },
+                'database': {
+                    'port': lambda v: 1 <= v <= 65535
+                },
+                'display': {
+                    'mode': lambda v: v in ['rich', 'simple', 'auto'],
+                    'refresh_rate': lambda v: 0.1 <= v <= 10
+                }
+            }
+
+            # Check if validation rule exists
+            if section in validation_rules and key in validation_rules[section]:
+                rule = validation_rules[section][key]
+                is_valid = rule(value)
+
+                return Response({
+                    'valid': is_valid,
+                    'message': 'Valid' if is_valid else f'Invalid value for [{section}] {key}'
+                })
+
+            # No specific validation rule - accept
+            return Response({
+                'valid': True,
+                'message': 'No validation rules - accepting value'
+            })
+
+        except Exception as e:
+            return Response({
+                'valid': False,
+                'message': str(e)
+            })
+
+
+# Service Control Views
+class CollectorStartView(APIView):
+    """Start collector service"""
+
+    def post(self, request):
+        """Start the collector"""
+        try:
+            # Check if running in Docker
+            if os.environ.get('DOCKER_CONTAINER') and DOCKER_AVAILABLE:
+                # Use Docker API to start container
+                client = docker.from_env()
+                try:
+                    container = client.containers.get('tiktok_scraper_collector')
+                    if container.status != 'running':
+                        container.start()
+                        logger.info("Started collector container")
+                    return Response({'success': True, 'mode': 'docker'})
+                except docker.errors.NotFound:
+                    # Create and start container
+                    subprocess.run(['docker-compose', 'up', '-d', 'collector'],
+                                 cwd=settings.BASE_DIR)
+                    return Response({'success': True, 'mode': 'docker-compose'})
+            else:
+                # Start collector process directly
+                venv_python = os.path.join(settings.BASE_DIR, 'venv', 'bin', 'python')
+                process = subprocess.Popen(
+                    [venv_python, 'collector.py', '--from-queue'],
+                    cwd=settings.BASE_DIR
+                )
+
+                # Store process info
+                CollectorRun.objects.create(
+                    started_at=datetime.now(),
+                    status='running'
+                )
+
+                return Response({
+                    'success': True,
+                    'pid': process.pid,
+                    'mode': 'local'
+                })
+
+        except Exception as e:
+            logger.error(f"Error starting collector: {e}")
+            return Response({
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class CollectorStopView(APIView):
+    """Stop collector service"""
+
+    def post(self, request):
+        """Stop the collector"""
+        try:
+            if os.environ.get('DOCKER_CONTAINER') and DOCKER_AVAILABLE:
+                # Stop Docker container
+                client = docker.from_env()
+                try:
+                    container = client.containers.get('tiktok_scraper_collector')
+                    container.stop()
+                    return Response({'success': True, 'mode': 'docker'})
+                except docker.errors.NotFound:
+                    return Response({'success': True, 'message': 'Container not running'})
+            else:
+                # Stop local process
+                result = subprocess.run(['pkill', '-f', 'collector.py'],
+                                      capture_output=True)
+
+                # Update status
+                CollectorRun.objects.filter(status='running').update(
+                    status='stopped',
+                    ended_at=datetime.now()
+                )
+
+                return Response({
+                    'success': True,
+                    'mode': 'local'
+                })
+
+        except Exception as e:
+            logger.error(f"Error stopping collector: {e}")
+            return Response({
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class CollectorRestartView(APIView):
+    """Restart collector service"""
+
+    def post(self, request):
+        """Restart the collector"""
+        try:
+            # Stop first
+            stop_view = CollectorStopView()
+            stop_response = stop_view.post(request)
+
+            # Wait a moment
+            time.sleep(2)
+
+            # Start again
+            start_view = CollectorStartView()
+            start_response = start_view.post(request)
+
+            return Response({
+                'success': True,
+                'message': 'Collector restarted'
+            })
+
+        except Exception as e:
+            logger.error(f"Error restarting collector: {e}")
+            return Response({
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class CollectorStatusView(APIView):
+    """Get detailed collector status"""
+
+    def get(self, request):
+        """Get collector status"""
+        try:
+            status_info = CollectorService.get_collector_stats()
+
+            # Add container info if in Docker
+            if os.environ.get('DOCKER_CONTAINER') and DOCKER_AVAILABLE:
+                try:
+                    client = docker.from_env()
+                    container = client.containers.get('tiktok_scraper_collector')
+                    status_info['container'] = {
+                        'id': container.short_id,
+                        'status': container.status,
+                        'created': container.attrs['Created'],
+                        'state': container.attrs['State']
+                    }
+                except:
+                    pass
+
+            return Response(status_info)
+
+        except Exception as e:
+            logger.error(f"Error getting collector status: {e}")
+            return Response({
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class MLServiceStartView(APIView):
+    """Start ML training"""
+
+    def post(self, request):
+        """Start ML training"""
+        try:
+            # Run ML training
+            venv_python = os.path.join(settings.BASE_DIR, 'venv', 'bin', 'python')
+            process = subprocess.Popen(
+                [venv_python, 'ml/train_ml.py', 'train'],
+                cwd=settings.BASE_DIR
+            )
+
+            # Create training run record
+            MLTrainingRun.objects.create(
+                model_name='TikTokPerformancePredictor',
+                status='running',
+                trained_at=datetime.now()
+            )
+
+            return Response({
+                'success': True,
+                'pid': process.pid
+            })
+
+        except Exception as e:
+            logger.error(f"Error starting ML training: {e}")
+            return Response({
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class MLServiceStopView(APIView):
+    """Stop ML training"""
+
+    def post(self, request):
+        """Stop ML training"""
+        try:
+            # Kill ML training process
+            subprocess.run(['pkill', '-f', 'train_ml.py'])
+
+            # Update status
+            MLTrainingRun.objects.filter(status='running').update(
+                status='stopped'
+            )
+
+            return Response({'success': True})
+
+        except Exception as e:
+            logger.error(f"Error stopping ML training: {e}")
+            return Response({
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class MLServiceStatusView(APIView):
+    """Get ML service status"""
+
+    def get(self, request):
+        """Get ML training status"""
+        try:
+            # Check if training is running
+            result = subprocess.run(['pgrep', '-f', 'train_ml.py'],
+                                  capture_output=True, text=True)
+            is_running = bool(result.stdout.strip())
+
+            # Get latest training run
+            latest_run = MLTrainingRun.objects.order_by('-trained_at').first()
+
+            return Response({
+                'running': is_running,
+                'latest_run': {
+                    'id': latest_run.id,
+                    'status': latest_run.status,
+                    'trained_at': latest_run.trained_at,
+                    'r2_score': latest_run.r2_score,
+                    'effectiveness_score': latest_run.effectiveness_score
+                } if latest_run else None
+            })
+
+        except Exception as e:
+            logger.error(f"Error getting ML status: {e}")
+            return Response({
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# Container Management Views
+class ContainerStatusView(APIView):
+    """Get container status for auto-scaling"""
+
+    def get(self, request):
+        """Get container and queue status"""
+        try:
+            pending = QueuedURL.objects.filter(status='pending').count()
+            processing = QueuedURL.objects.filter(status='processing').count()
+
+            container_status = {
+                'queue_depth': pending,
+                'processing': processing,
+                'should_scale_up': pending > 10,  # Configurable threshold
+                'should_scale_down': pending == 0 and processing == 0
+            }
+
+            # Check container status if in Docker
+            if os.environ.get('DOCKER_CONTAINER') and DOCKER_AVAILABLE:
+                try:
+                    client = docker.from_env()
+                    container = client.containers.get('tiktok_scraper_collector')
+                    container_status['container'] = {
+                        'running': container.status == 'running',
+                        'status': container.status
+                    }
+                except docker.errors.NotFound:
+                    container_status['container'] = {
+                        'running': False,
+                        'status': 'not_found'
+                    }
+
+            return Response(container_status)
+
+        except Exception as e:
+            logger.error(f"Error getting container status: {e}")
+            return Response({
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ContainerScaleView(APIView):
+    """Scale collector container based on queue"""
+
+    def post(self, request):
+        """Scale container up or down"""
+        try:
+            action = request.data.get('action', 'auto')
+            workers = request.data.get('workers', None)
+
+            if action == 'auto':
+                # Auto-scale based on queue
+                pending = QueuedURL.objects.filter(status='pending').count()
+
+                if pending > 50:
+                    workers = 8
+                elif pending > 20:
+                    workers = 4
+                elif pending > 10:
+                    workers = 2
+                elif pending > 0:
+                    workers = 1
+                else:
+                    # No pending URLs - stop container
+                    if os.environ.get('DOCKER_CONTAINER') and DOCKER_AVAILABLE:
+                        client = docker.from_env()
+                        try:
+                            container = client.containers.get('tiktok_scraper_collector')
+                            container.stop()
+                        except:
+                            pass
+
+                    return Response({
+                        'success': True,
+                        'action': 'stopped',
+                        'reason': 'no_pending_urls'
+                    })
+
+            # Update worker count in config
+            if workers:
+                config_path = os.path.join(settings.BASE_DIR, 'config.toml')
+                with open(config_path, 'rb') as f:
+                    try:
+                        import tomllib
+                    except ImportError:
+                        import tomli as tomllib
+                    config = tomllib.load(f)
+
+                if 'processing' not in config:
+                    config['processing'] = {}
+                config['processing']['workers'] = workers
+
+                with open(config_path, 'w') as f:
+                    toml.dump(config, f)
+
+                # Restart collector with new worker count
+                restart_view = CollectorRestartView()
+                restart_view.post(request)
+
+                return Response({
+                    'success': True,
+                    'action': 'scaled',
+                    'workers': workers
+                })
+
+            return Response({'success': True})
+
+        except Exception as e:
+            logger.error(f"Error scaling container: {e}")
+            return Response({
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
