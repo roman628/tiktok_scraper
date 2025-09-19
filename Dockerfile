@@ -1,6 +1,6 @@
 # Multi-stage build for faster rebuilds
 # Stage 1: Base with all heavy dependencies (cached)
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS base
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04 AS base
 
 # Set environment to avoid interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
@@ -39,7 +39,8 @@ WORKDIR /app
 RUN python3 -m pip install --upgrade pip
 
 # Install PyTorch with CUDA support first (heaviest, changes least)
-RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# Using cu121 for better compatibility with CUDA 12.8 host
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
 # Copy only requirements file (not code yet)
 COPY requirements.txt .
@@ -47,9 +48,16 @@ COPY requirements.txt .
 # Install remaining Python packages
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Replace onnxruntime with GPU version for CUDA support
+# First downgrade numpy for compatibility, then install onnxruntime-gpu
+RUN pip uninstall -y onnxruntime && \
+    pip install --no-cache-dir "numpy<2" && \
+    pip install --no-cache-dir onnxruntime-gpu==1.18.1
+
 # Pre-download models and data
 RUN python -c "import nltk; nltk.download('punkt', quiet=True); nltk.download('stopwords', quiet=True); nltk.download('vader_lexicon', quiet=True)" || true && \
-    python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')" || true
+    python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')" || true && \
+    python -c "import whisper; whisper.load_model('base', download_root='/root/.cache/whisper')" || true
 
 # Stage 2: Final image with application code  
 # This stage only rebuilds when code changes

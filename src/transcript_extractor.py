@@ -9,118 +9,182 @@ from utils.device_manager import DeviceManager
 class TranscriptExtractor:
     """Handles video transcription using Whisper AI."""
     
-    def __init__(self, model_size: str = "base", device: str = "auto", shutdown_event=None):
+    def __init__(self, model_size: str = "base", device: str = "auto", shutdown_event=None, use_openai_whisper: bool = False):
         """Initialize Whisper model.
-        
+
         Args:
             model_size: Whisper model size (tiny, base, small, medium, large)
             device: Device to use (auto, cuda, mps, cpu)
             shutdown_event: Event for graceful shutdown
+            use_openai_whisper: Use OpenAI Whisper (higher GPU util) instead of faster-whisper
         """
         self.model_size = model_size
         self.shutdown_event = shutdown_event
-        
+        self.use_openai_whisper = use_openai_whisper
+
         # Use DeviceManager for device selection
         if device == "auto":
-            self.device = DeviceManager.get_best_device()
+            # Require GPU for transcription
+            self.device = DeviceManager.get_best_device(require_gpu=True)
         else:
             self.device = device
-        
+
         self.model = None
         self._load_model()
     
     def _load_model(self):
         """Load Whisper model with appropriate settings."""
-        # Force CPU for MPS devices for better compatibility
-        if self.device == "mps":
-            print("MPS detected, using CPU for better compatibility with faster-whisper")
-            self.device = "cpu"
-        
-        # Use faster-whisper only
-        from faster_whisper import WhisperModel
-        compute_type = DeviceManager.get_compute_type(self.device)
-        
-        try:
-            self.model = WhisperModel(
-                self.model_size,
-                device=self.device,
-                compute_type=compute_type
-            )
-            print(f"Loaded faster-whisper model: {self.model_size} on {self.device.upper()}")
-        except Exception as e:
-            print(f"Failed to load model on {self.device}: {e}")
-            if self.device != "cpu":
-                print("Falling back to CPU...")
+        if self.use_openai_whisper:
+            # Use OpenAI Whisper for better GPU utilization (70-90%)
+            import whisper
+            import torch
+
+            try:
+                # Set device for PyTorch
+                if self.device == "cuda" and torch.cuda.is_available():
+                    torch_device = "cuda"
+                elif self.device == "mps" and torch.backends.mps.is_available():
+                    torch_device = "mps"
+                else:
+                    torch_device = "cpu"
+
+                self.model = whisper.load_model(self.model_size, device=torch_device)
+                print(f"Loaded OpenAI Whisper model: {self.model_size} on {torch_device.upper()}")
+                print("Using OpenAI Whisper for higher GPU utilization (70-90%)")
+            except Exception as e:
+                print(f"Failed to load OpenAI Whisper on {self.device}: {e}")
+                if self.device != "cpu":
+                    print("Falling back to CPU...")
+                    self.model = whisper.load_model(self.model_size, device="cpu")
+                    print(f"Loaded OpenAI Whisper model: {self.model_size} on CPU")
+        else:
+            # Use faster-whisper (lower GPU utilization but more memory efficient)
+            # Force CPU for MPS devices for better compatibility
+            if self.device == "mps":
+                print("MPS detected, using CPU for better compatibility with faster-whisper")
                 self.device = "cpu"
+
+            from faster_whisper import WhisperModel
+            compute_type = DeviceManager.get_compute_type(self.device)
+
+            try:
                 self.model = WhisperModel(
                     self.model_size,
-                    device="cpu",
-                    compute_type="int8"
+                    device=self.device,
+                    compute_type=compute_type
                 )
-                print(f"Loaded faster-whisper model: {self.model_size} on CPU")
+                print(f"Loaded faster-whisper model: {self.model_size} on {self.device.upper()}")
+                print("Using faster-whisper (memory efficient, 5-20% GPU utilization)")
+            except Exception as e:
+                print(f"Failed to load model on {self.device}: {e}")
+                if self.device != "cpu":
+                    print("Falling back to CPU...")
+                    self.device = "cpu"
+                    self.model = WhisperModel(
+                        self.model_size,
+                        device="cpu",
+                        compute_type="int8"
+                    )
+                    print(f"Loaded faster-whisper model: {self.model_size} on CPU")
     
     def extract_transcript(self, video_path: str, progress_callback=None) -> str:
         """Extract transcript from video file with progress tracking.
-        
+
         Args:
             video_path: Path to the video file
             progress_callback: Optional callback for progress updates
-            
+
         Returns:
             Transcript text or empty string if extraction fails
         """
         if not os.path.exists(video_path):
             print(f"Video file not found: {video_path}")
             return ""
-        
+
         try:
             # Extract audio if needed
             audio_path = self._extract_audio(video_path)
             if not audio_path:
                 return ""
-            
-            # faster-whisper transcription with chunked processing
-            segments_list = []
-            segments, info = self.model.transcribe(
-                audio_path,
-                beam_size=5,
-                language="en",
-                condition_on_previous_text=False
-            )
-            
-            # Get total duration for progress calculation
-            total_duration = info.duration if hasattr(info, 'duration') else 0
-            current_time = 0.0
-            
-            # Process segments incrementally with progress updates
-            for i, segment in enumerate(segments):
-                # Check shutdown every 10 segments
-                if i % 10 == 0 and self.shutdown_event and self.shutdown_event.is_set():
-                    print(f"Transcription interrupted at segment {i} due to shutdown")
-                    break
-                
-                segments_list.append(segment.text.strip())
-                
-                # Update progress based on segment end time
-                if progress_callback and total_duration > 0 and hasattr(segment, 'end'):
-                    current_time = segment.end
-                    percent_complete = (current_time / total_duration) * 100
-                    # Call update_transcription method on WorkerProgress object
-                    progress_callback.update_transcription(current_time, total_duration)
-            
-            # Ensure we report 100% completion
-            if progress_callback and total_duration > 0:
-                progress_callback.update_transcription(total_duration, total_duration)
-            
-            # Combine segments into full transcript
-            transcript = " ".join(segments_list)
-            
+
+            if self.use_openai_whisper:
+                # OpenAI Whisper transcription
+                print(f"[OpenAI Whisper] Starting transcription of {audio_path}")
+                import time
+                start_time = time.time()
+
+                try:
+                    result = self.model.transcribe(audio_path, language="en", verbose=False, fp16=False)
+                    print(f"[OpenAI Whisper] Transcription completed in {time.time() - start_time:.1f}s")
+                except Exception as e:
+                    print(f"[OpenAI Whisper] Transcription failed: {e}")
+                    raise
+
+                # Process segments with progress updates
+                segments_list = []
+                total_duration = result.get("segments", [])[-1]["end"] if result.get("segments") else 0
+
+                for i, segment in enumerate(result.get("segments", [])):
+                    # Check shutdown every 10 segments
+                    if i % 10 == 0 and self.shutdown_event and self.shutdown_event.is_set():
+                        print(f"Transcription interrupted at segment {i} due to shutdown")
+                        break
+
+                    segments_list.append(segment["text"].strip())
+
+                    # Update progress
+                    if progress_callback and total_duration > 0:
+                        current_time = segment["end"]
+                        progress_callback.update_transcription(current_time, total_duration)
+
+                # Ensure we report 100% completion
+                if progress_callback and total_duration > 0:
+                    progress_callback.update_transcription(total_duration, total_duration)
+
+                transcript = " ".join(segments_list)
+            else:
+                # faster-whisper transcription with chunked processing
+                segments_list = []
+                segments, info = self.model.transcribe(
+                    audio_path,
+                    beam_size=5,
+                    language="en",
+                    condition_on_previous_text=False
+                )
+
+                # Get total duration for progress calculation
+                total_duration = info.duration if hasattr(info, 'duration') else 0
+                current_time = 0.0
+
+                # Process segments incrementally with progress updates
+                for i, segment in enumerate(segments):
+                    # Check shutdown every 10 segments
+                    if i % 10 == 0 and self.shutdown_event and self.shutdown_event.is_set():
+                        print(f"Transcription interrupted at segment {i} due to shutdown")
+                        break
+
+                    segments_list.append(segment.text.strip())
+
+                    # Update progress based on segment end time
+                    if progress_callback and total_duration > 0 and hasattr(segment, 'end'):
+                        current_time = segment.end
+                        percent_complete = (current_time / total_duration) * 100
+                        # Call update_transcription method on WorkerProgress object
+                        progress_callback.update_transcription(current_time, total_duration)
+
+                # Ensure we report 100% completion
+                if progress_callback and total_duration > 0:
+                    progress_callback.update_transcription(total_duration, total_duration)
+
+                # Combine segments into full transcript
+                transcript = " ".join(segments_list)
+
             # Cleanup audio file
             if audio_path != video_path and os.path.exists(audio_path):
                 os.remove(audio_path)
-            
+
             return transcript.strip()
-            
+
         except Exception as e:
             print(f"Transcription error: {e}")
             return ""

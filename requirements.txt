@@ -11,7 +11,8 @@ yt-dlp>=2023.1.0
 TikTokApi>=6.0.0
 
 # Audio processing (for whisper transcription - core feature)
-faster-whisper>=1.0.0  # Using faster-whisper instead of openai-whisper
+faster-whisper>=1.0.0  # Memory-efficient whisper implementation
+openai-whisper>=20231117  # OpenAI's original whisper for high GPU utilization
 
 # Rich terminal UI
 rich>=13.0.0  # For enhanced progress display

@@ -95,14 +95,26 @@ class CollectorService:
     @staticmethod
     def trigger_processing():
         """
-        In the new architecture, the collector runs continuously as a service.
-        This method now just logs that URLs have been queued.
+        Automatically start collector if not running and there are pending URLs.
         """
         pending_count = QueuedURL.objects.filter(status='pending').count()
-        
+
         if pending_count > 0:
             logger.info(f"📋 {pending_count} URL(s) queued for processing")
-            logger.info("Collector service will process them automatically")
+
+            # Check if collector is already running
+            from .background_tasks import BackgroundTaskManager
+            manager = BackgroundTaskManager()
+
+            if not manager.is_collector_running():
+                logger.info("🚀 Auto-starting collector to process queue")
+                result = manager.start_collector()
+                if result['success']:
+                    logger.info(f"✅ Collector started with PID {result.get('pid')}")
+                else:
+                    logger.error(f"❌ Failed to start collector: {result.get('message')}")
+            else:
+                logger.info("Collector is already running")
         else:
             logger.info("No pending URLs to process")
     

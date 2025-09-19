@@ -312,6 +312,11 @@ class RobustTikTokProcessor:
         # Add URLs to queue
         for url in urls:
             url_queue.put(url)
+
+        # Add sentinel values to signal workers to exit when done
+        # This ensures workers don't hang waiting for more URLs after batch completes
+        for _ in range(self.args.workers):
+            url_queue.put(None)
         
         # Setup display - detect subprocess and force simple mode
         display_mode = getattr(self.args, 'display_mode', 'auto')
@@ -341,7 +346,8 @@ class RobustTikTokProcessor:
         if data_collection_config.get('transcription', True):
             from utils.device_manager import DeviceManager
             device_manager = DeviceManager()
-            device = device_manager.get_best_device(force_cpu=False)
+            # Always require GPU for transcription
+            device = device_manager.get_best_device(force_cpu=False, require_gpu=True)
             whisper_config = {
                 'model_size': getattr(self.args, 'whisper_model', 'small.en'),
                 'device': device.lower(),
@@ -360,6 +366,13 @@ class RobustTikTokProcessor:
             )
             p.start()
             workers.append(p)
+
+            # Stagger worker initialization to prevent CUDA conflicts
+            # Only add delay when using GPU and OpenAI Whisper
+            if i < self.args.workers - 1:  # Don't delay after the last worker
+                use_openai_whisper = self.config.get('download', {}).get('use_openai_whisper', False)
+                if use_openai_whisper and whisper_config.get('device', 'cpu') != 'cpu':
+                    time.sleep(0.5)  # 500ms delay between worker starts
         
         # Start watchdog thread for additional monitoring
         watchdog = self._start_watchdog_thread(workers, shutdown_event, result_queue, status_queue)
@@ -1485,8 +1498,9 @@ async def main():
     if database_mode:
         import time
         no_urls_count = 0
-        max_idle_iterations = 3  # Exit after 3 checks with no URLs
-        check_interval = 5  # Seconds between checks
+        # Make auto-stop configurable
+        max_idle_iterations = config.get('processing', {}).get('max_idle_checks', 3)  # Exit after N checks with no URLs
+        check_interval = config.get('processing', {}).get('queue_check_interval', 5)  # Seconds between checks
         
         print("\n🔄 Starting continuous queue processing mode...")
         print(f"Will check for new URLs every {check_interval} seconds")
@@ -1550,10 +1564,15 @@ async def main():
                         else:
                             urls = [args.url]
                         
+                        # Store original URLs before filtering for database update
+                        original_urls_for_db = urls.copy()
+
                         # Filter duplicates
                         original_count = len(urls)
+                        print(f"DEBUG: About to filter {original_count} URLs")
                         urls = processor.filter_urls(urls)
-                        
+                        print(f"DEBUG: After filtering, {len(urls)} URLs remain")
+
                         if urls:
                             print(f"Processing {len(urls)} of {original_count} URLs")
                             
@@ -1589,6 +1608,23 @@ async def main():
                                 cursor.connection.commit()
                         else:
                             print(f"All {original_count} URLs already processed")
+                            # Mark duplicate URLs as completed since they're already in database
+                            try:
+                                with db.get_cursor() as cursor:
+                                    cursor.execute("""
+                                        UPDATE queued_urls
+                                        SET status = 'completed', processed_at = NOW(),
+                                            error_message = 'Already in database'
+                                        WHERE url = ANY(%s) AND status = 'processing'
+                                    """, (original_urls_for_db,))
+                                    rows_updated = cursor.rowcount
+                                    cursor.connection.commit()
+                                    if rows_updated > 0:
+                                        print(f"✅ Updated queue status for {rows_updated} duplicate URL(s)")
+                                    else:
+                                        print(f"⚠️ No URLs were updated (expected {len(original_urls_for_db)})")
+                            except Exception as e:
+                                print(f"❌ Error updating queue status: {e}")
                     else:
                         no_urls_count += 1
                         if no_urls_count >= max_idle_iterations:

@@ -14,6 +14,14 @@ output_dir = "downloads"
 quality = "best"
 # Download audio only as MP3
 audio_only = false
+# Enable Whisper transcription
+whisper = true
+# Whisper model size: "tiny", "base", "small", "medium", "large"
+whisper_model = "base"
+# Force CPU usage for Whisper even if GPU available
+force_cpu = false
+# Use OpenAI Whisper (high GPU util 70-90%) instead of faster-whisper (low 5-20% but memory efficient)
+use_openai_whisper = true
 
 [comments]
 # Maximum comments to extract per video (0 = all comments)
@@ -26,6 +34,10 @@ batch_size = 10
 delay = 2
 # Number of worker processes for parallel processing (1 = single process)
 workers = 1
+# Auto-stop after N consecutive checks with no URLs (0 = never stop)
+max_idle_checks = 3
+# Seconds between queue checks
+queue_check_interval = 5
 
 [output]
 # Main JSON output file (used only when database.enabled=false)

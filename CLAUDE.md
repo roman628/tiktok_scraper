@@ -22,7 +22,8 @@ config.toml      # Configuration
 
 ## Critical Configuration Requirements
 
-**DATABASE USER CONFIGURATION - CRITICAL**: 
+### Database Configuration
+**DATABASE USER CONFIGURATION - CRITICAL**:
 - **NEVER use 'root' as a default database user** - this has caused persistent connection issues
 - All database connections MUST use the configured user from `config.toml`
 - Default database user should be 'postgres' to align with PostgreSQL standards
@@ -35,6 +36,42 @@ config.toml      # Configuration
   - `utils/worker_manager.py`
   - `src/database_manager.py`
   - `collector.py`
+
+### Docker GPU Configuration (Fixed 2025-09-19)
+**GPU PASSTHROUGH - CRITICAL**:
+- Docker requires explicit device mounting for GPU access
+- The `runtime: nvidia` alone is NOT sufficient with newer drivers (570+)
+- **Solution**: Mount NVIDIA devices directly in docker-compose.yml:
+  ```yaml
+  devices:
+    - /dev/nvidia0
+    - /dev/nvidiactl
+    - /dev/nvidia-uvm
+    - /dev/nvidia-uvm-tools
+    - /dev/nvidia-modeset
+  ```
+- This fixes "Failed to initialize NVML: Unknown Error" and enables PyTorch CUDA
+- **Model Pre-download**: Dockerfile now pre-downloads Whisper models during build to prevent
+  runtime checksum errors and ensure faster first-run performance
+
+**WHISPER GPU USAGE - CRITICAL**:
+- Whisper uses ONNX Runtime, NOT PyTorch for GPU acceleration
+- **MUST install `onnxruntime-gpu`** instead of `onnxruntime` in Dockerfile:
+  ```dockerfile
+  RUN pip uninstall -y onnxruntime && \
+      pip install --no-cache-dir "numpy<2" && \
+      pip install --no-cache-dir onnxruntime-gpu==1.18.1
+  ```
+- Without this, Whisper will use CPU even if PyTorch detects CUDA
+- Verify with: `ort.get_available_providers()` should include `CUDAExecutionProvider`
+- **GPU Utilization - CRITICAL CHOICE**:
+  - **OpenAI Whisper** (default, `use_openai_whisper=true`): 70-90% GPU utilization, uses PyTorch backend
+  - **faster-whisper** (`use_openai_whisper=false`): 5-20% GPU utilization, uses ONNX Runtime
+  - Configure in `config.toml` under `[download]` section
+- **Multi-Worker GPU**: When using OpenAI Whisper with multiple workers, CUDA initialization requires
+  500ms staggered starts to prevent deadlock (automatically handled)
+- **No CPU fallback**: System now requires GPU and will fail if not available
+- DeviceManager.get_best_device() has `require_gpu=True` by default
 
 ## Testing Requirements
 
@@ -124,24 +161,31 @@ This ensures the pipeline never hangs on impossible operations while maintaining
 ## Configuration
 
 ### CLI Arguments
-- `--from-file` / `--url` - Input source
+- `--url` - Single TikTok URL to process
+- `--from-file` - File containing URLs (one per line)
 - `--whisper` / `--force-cpu` - Transcription settings
 - `--ms-token` / `--max-comments` - Comment extraction
 - `--workers` / `--batch-size` - Processing control
 - `--display-mode` - Display mode (rich/simple/auto)
 - `--raw-log` - Save raw output to timestamped log file
+- When no `--url` or `--from-file` is provided, collector automatically enters database queue mode
 
 ### config.toml Sections
 ```toml
 [tiktok]           # ms_token
-[download]         # quality, whisper settings
-[processing]       # batch_size, delay, workers
+[download]         # quality, whisper settings, use_openai_whisper
+[processing]       # batch_size, delay, workers, max_idle_checks, queue_check_interval
 [display]          # mode, raw_log, refresh_rate, console_lines
 [data_collection]  # Enable/disable hashtags, OCR, transcription, etc.
 [database]         # PostgreSQL connection settings (always used)
 ```
 
 **Auto-Config Updates**: The collector automatically detects missing configuration settings by comparing `config.toml` with `assets/config.template.toml`. Any missing settings are added with default values and a warning is displayed, ensuring the system always has required configuration without manual intervention.
+
+### Key Configuration Options
+- `use_openai_whisper` (default: true): Use OpenAI Whisper (70-90% GPU) instead of faster-whisper (5-20% GPU)
+- `max_idle_checks` (default: 3): Number of idle checks before auto-stopping collector
+- `queue_check_interval` (default: 5): Seconds between database queue checks
 
 ## Enhanced Display System
 
@@ -323,6 +367,38 @@ The project includes an intelligent setup script (`setup.sh`) that automatically
 
 The `--migrate` flag is particularly important for database updates: running `./setup.sh --migrate` will apply any new schema changes from `database/schema.sql` to your existing database, create a timestamped backup before migration, run medallion architecture migrations, and update ML features in the gold layer. This makes it safe to update the database structure without losing data.
 
+## Configuration Management System
+
+### Dashboard Settings Integration
+The dashboard provides a comprehensive settings interface that directly modifies `config.toml`:
+
+#### How Settings Work:
+1. **Loading Configuration**:
+   - `ConfigView` (server/views.py:726) reads `config.toml` and returns it as JSON
+   - Dashboard calls `loadConfig()` on page load to populate all settings fields
+   - Each setting input has `data-section` and `data-key` attributes mapping to config.toml structure
+
+2. **Saving Settings**:
+   - When user changes a setting, `validateAndSave()` is called
+   - `ConfigValidateView` checks if the value is valid
+   - `ConfigUpdateView` updates the specific section/key in config.toml
+   - Changes are written directly to the file via `toml.dump()`
+
+3. **Dynamic Settings Used by Services**:
+   - **Worker Count**: `[processing] workers` - controls parallel processing (default: 1)
+   - **Batch Size**: `[processing] batch_size` - URLs per batch (default: 10)
+   - **Processing Delay**: `[processing] delay` - seconds between URLs
+   - **Whisper Settings**: `[download] whisper`, `whisper_model`, `force_cpu`
+   - **Data Collection**: `[data_collection]` - toggles for metadata, transcription, OCR, etc.
+   - **ML Settings**: `[ml]` - auto_train_after_collection, min_duration, min_words
+
+4. **Service Integration**:
+   - Collector reads workers from `config['processing']['workers']` at startup
+   - ML training reads thresholds from `config['ml']` section
+   - All services reload config when starting to use latest settings
+
+**IMPORTANT**: When starting collector or ML training from dashboard, the services MUST read the current config.toml values, not use hardcoded defaults. The dashboard settings should be the single source of truth.
+
 ## Dashboard System
 
 ### Live Polling Mechanism
@@ -420,17 +496,25 @@ When new analysis capabilities are added, the `--recalibrate` flag (see `src/rec
 **NOTE** comment extraction has been patched indefinitely and there is nothing we can do as of 8/20/2025 to fix it 
 - any new additions to the config.toml should be added to the config.template.toml
 
-### Worker Architecture and Context Identification (as of 8/29/2025)
+### Worker Architecture and Lifecycle Management (Updated 2025-09-19)
 
-**CRITICAL**: The system uses two different worker implementations depending on how the collector is started:
-1. **Direct execution** (`python collector.py`): Uses `worker_process_single` from `collector.py`
-2. **Normal execution** (via Django or direct): Uses `enhanced_worker_process` from `utils/worker_manager.py`
-
-The `enhanced_worker_process` is the primary worker implementation that includes:
+**Worker Implementation**: The system uses `enhanced_worker_process` from `utils/worker_manager.py` which includes:
 - Context identification initialization and cleanup
-- Heartbeat monitoring and status reporting  
+- Heartbeat monitoring and status reporting
 - Database-based URL queue management
 - Proper resource cleanup in finally blocks
+
+**Batch Processing and Worker Exit**:
+- Workers receive URLs from a multiprocessing queue
+- **CRITICAL**: Sentinel values (None) are added after all URLs to signal workers to exit
+- Without sentinel values, workers hang waiting for more work after batch completion
+- Each worker exits cleanly when receiving None from the queue
+
+**Auto-Start/Stop Mechanism**:
+- **Auto-Start**: Triggered by `CollectorService.trigger_processing()` when URLs are submitted via API
+- **Auto-Stop**: After `max_idle_checks` iterations with no pending URLs (configurable, default: 3)
+- Managed by `BackgroundTaskManager` in `server/background_tasks.py`
+- Collector runs as subprocess within Django container for unified deployment
 
 **Context Identification Integration**:
 - Context identification requires the virtual environment to be active (for psycopg2 and sentence-transformers)

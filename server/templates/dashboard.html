@@ -92,6 +92,11 @@
             color: #991b1b;
         }
 
+        .status-idle {
+            background: #f3f4f6;
+            color: #6b7280;
+        }
+
         .status-training {
             background: #dbeafe;
             color: #1e40af;
@@ -374,7 +379,15 @@
             height: 12px;
             border-radius: 50%;
             margin-right: 8px;
+        }
+
+        .status-indicator.status-running {
+            background: #10b981;
             animation: pulse 2s infinite;
+        }
+
+        .status-indicator.status-stopped {
+            background: #ef4444;
         }
 
         @keyframes pulse {
@@ -642,98 +655,168 @@
     <div class="container">
         <h1>🎵 TikTok Scraper Dashboard</h1>
 
-        <!-- Service Control Panel -->
-        <div class="service-control-panel">
-            <h2 style="margin-bottom: 20px;">
-                <i class="fas fa-cogs"></i> Service Control
-            </h2>
-
-            <!-- Collector Service -->
-            <div class="service-card">
-                <div class="service-header">
-                    <div>
-                        <span class="service-name">
-                            <i class="fas fa-robot"></i> Collector Service
-                        </span>
-                        <span id="collector-status" class="service-status status-stopped">
-                            {% if collector_running %}Running{% else %}Stopped{% endif %}
-                        </span>
-                        <div class="loading-spinner" id="collector-spinner"></div>
-                    </div>
-                    <div id="collector-mode" style="font-size: 0.85rem; color: #6b7280;">
-                        Mode: <span id="collector-mode-value">Manual</span>
-                    </div>
+        <!-- Stats Grid with integrated Service Controls -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Collector Service</div>
+                <div class="stat-value" id="collector-status-old" style="margin-bottom: 10px;">
+                    {% if collector_running %}
+                        <span class="status-indicator status-running"></span>Running
+                    {% else %}
+                        <span class="status-indicator status-stopped"></span>Stopped
+                    {% endif %}
                 </div>
-                <div class="service-controls">
-                    <button class="control-btn btn-start" onclick="controlService('collector', 'start')">
-                        <i class="fas fa-play"></i> Start
+                <div style="display: flex; gap: 5px; justify-content: center;">
+                    <button class="control-btn btn-start" style="padding: 4px 8px; font-size: 0.8rem;"
+                            onclick="controlService('collector', 'start')" title="Start">
+                        <i class="fas fa-play"></i>
                     </button>
-                    <button class="control-btn btn-stop" onclick="controlService('collector', 'stop')">
-                        <i class="fas fa-stop"></i> Stop
+                    <button class="control-btn btn-stop" style="padding: 4px 8px; font-size: 0.8rem;"
+                            onclick="controlService('collector', 'stop')" title="Stop">
+                        <i class="fas fa-stop"></i>
                     </button>
-                    <button class="control-btn btn-restart" onclick="controlService('collector', 'restart')">
-                        <i class="fas fa-sync"></i> Restart
+                    <button class="control-btn btn-restart" style="padding: 4px 8px; font-size: 0.8rem;"
+                            onclick="controlService('collector', 'restart')" title="Restart">
+                        <i class="fas fa-sync"></i>
                     </button>
-                </div>
-                <div id="collector-scaling" class="auto-scaling-status" style="display: none;">
-                    <div class="scaling-metric">
-                        <span class="metric-label">Queue Depth:</span>
-                        <span class="metric-value" id="queue-depth">0</span>
-                    </div>
-                    <div class="scaling-metric">
-                        <span class="metric-label">Active Workers:</span>
-                        <span class="metric-value" id="active-workers">0</span>
-                    </div>
-                    <div class="scaling-metric">
-                        <span class="metric-label">Auto-Scale Status:</span>
-                        <span class="metric-value" id="scale-status">Idle</span>
-                    </div>
                 </div>
             </div>
 
-            <!-- ML Training Service -->
-            <div class="service-card">
-                <div class="service-header">
-                    <div>
-                        <span class="service-name">
-                            <i class="fas fa-brain"></i> ML Training
-                        </span>
-                        <span id="ml-status" class="service-status status-stopped">
-                            Idle
-                        </span>
-                        <div class="loading-spinner" id="ml-spinner"></div>
-                    </div>
-                    <div style="font-size: 0.85rem; color: #6b7280;">
-                        <span id="ml-last-run">Never run</span>
-                    </div>
+            <div class="stat-card">
+                <div class="stat-label">ML Training Service</div>
+                <div class="stat-value" id="ml-training-status" style="margin-bottom: 10px;">
+                    <span class="status-indicator status-stopped"></span>Idle
                 </div>
-                <div class="service-controls">
-                    <button class="control-btn btn-start" onclick="controlService('ml', 'start')">
-                        <i class="fas fa-play"></i> Start Training
+                <div style="display: flex; gap: 5px; justify-content: center;">
+                    <button class="control-btn btn-start" style="padding: 4px 8px; font-size: 0.8rem;"
+                            onclick="controlService('ml', 'start')" title="Start Training">
+                        <i class="fas fa-play"></i>
                     </button>
-                    <button class="control-btn btn-stop" onclick="controlService('ml', 'stop')">
-                        <i class="fas fa-stop"></i> Stop Training
+                    <button class="control-btn btn-stop" style="padding: 4px 8px; font-size: 0.8rem;"
+                            onclick="controlService('ml', 'stop')" title="Stop Training">
+                        <i class="fas fa-stop"></i>
                     </button>
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-label">Last Collector Run</div>
+                <div class="stat-value date-value" id="last-collector-run">
+                    {% if last_collector_date %}
+                        {{ last_collector_date|date:"M d, H:i" }}
+                    {% else %}
+                        <span class="no-data">Never</span>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-label">Last ML Training</div>
+                <div class="stat-value date-value" id="last-ml-training">
+                    {% if last_ml_date %}
+                        {{ last_ml_date|date:"M d, H:i" }}
+                    {% else %}
+                        <span class="no-data">Never</span>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-label">Total Videos</div>
+                <div class="stat-value" id="total-videos">{{ video_count|floatformat:0 }}</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-label">Total URLs Collected</div>
+                <div class="stat-value" id="total-urls">{{ url_count|floatformat:0 }}</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-label">Last Run URLs Processed</div>
+                <div class="stat-value" id="last-run-urls">{{ last_run_urls_processed|floatformat:0 }}</div>
+            </div>
+        </div>
+
+        <div class="url-stats">
+            <h2>📊 URL Processing Status</h2>
+            <div class="url-breakdown">
+                <div class="url-stat">
+                    <div class="url-count" id="pending-count">{{ pending_urls }}</div>
+                    <div class="url-label">Pending</div>
+                </div>
+                <div class="url-stat">
+                    <div class="url-count" id="processing-count">0</div>
+                    <div class="url-label">Processing</div>
+                </div>
+                <div class="url-stat">
+                    <div class="url-count" id="completed-count">{{ completed_urls }}</div>
+                    <div class="url-label">Completed</div>
+                </div>
+                <div class="url-stat">
+                    <div class="url-count" id="failed-count">{{ failed_urls }}</div>
+                    <div class="url-label">Failed</div>
                 </div>
             </div>
         </div>
 
-        <!-- Settings Panel -->
+        <div class="ml-results">
+            <h2>🧠 ML Test Results</h2>
+
+            <div class="ml-metrics-grid">
+                <div class="ml-metric-card">
+                    <div class="metric-label">Model Effectiveness</div>
+                    <div class="metric-value" id="ml-effectiveness">--</div>
+                    <div class="metric-change" id="ml-change"></div>
+                </div>
+                <div class="ml-metric-card">
+                    <div class="metric-label">R² Score</div>
+                    <div class="metric-value" id="ml-r2">--</div>
+                    <div class="metric-change" id="ml-r2-change"></div>
+                </div>
+                <div class="ml-metric-card">
+                    <div class="metric-label">MAE</div>
+                    <div class="metric-value" id="ml-mae">--</div>
+                    <div class="metric-change" id="ml-mae-change"></div>
+                </div>
+                <div class="ml-metric-card">
+                    <div class="metric-label">RMSE</div>
+                    <div class="metric-value" id="ml-rmse">--</div>
+                    <div class="metric-change" id="ml-rmse-change"></div>
+                </div>
+            </div>
+
+            <div class="ml-tabs">
+                <button class="ml-tab active" onclick="showMLTab('predictions')">Sample Predictions</button>
+                <button class="ml-tab" onclick="showMLTab('history')">Performance History</button>
+            </div>
+
+            <div class="ml-tab-content" id="predictions-tab">
+                <div class="test-predictions" id="test-predictions">
+                    <p class="no-data">No test predictions available yet</p>
+                </div>
+            </div>
+
+            <div class="ml-tab-content" id="history-tab" style="display: none;">
+                <canvas id="ml-performance-chart"></canvas>
+            </div>
+        </div>
+
+        <!-- Configuration Settings Panel (moved to bottom) -->
         <div class="settings-panel">
             <div class="settings-header">
                 <h2 class="settings-title">
                     <i class="fas fa-sliders-h"></i> Configuration Settings
                 </h2>
-                <button class="settings-toggle" onclick="toggleSettings()">
-                    <i class="fas fa-chevron-down" id="settings-icon"></i> Toggle
-                </button>
             </div>
 
-            <div class="settings-content" id="settings-content">
+            <div class="settings-content show" id="settings-content">
                 <!-- Nav tabs -->
                 <ul class="nav nav-tabs mb-3" role="tablist">
                     <li class="nav-item">
-                        <a class="nav-link active" data-bs-toggle="tab" href="#database-tab">Database</a>
+                        <a class="nav-link active" data-bs-toggle="tab" href="#data-collection-tab">Data Collection</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-bs-toggle="tab" href="#database-tab">Database</a>
                     </li>
                     <li class="nav-item">
                         <a class="nav-link" data-bs-toggle="tab" href="#processing-tab">Processing</a>
@@ -747,15 +830,79 @@
                     <li class="nav-item">
                         <a class="nav-link" data-bs-toggle="tab" href="#ml-tab">ML Training</a>
                     </li>
-                    <li class="nav-item">
-                        <a class="nav-link" data-bs-toggle="tab" href="#autoscale-tab">Auto-Scaling</a>
-                    </li>
                 </ul>
 
                 <!-- Tab content -->
                 <div class="tab-content">
+                    <!-- Data Collection Settings -->
+                    <div class="tab-pane fade show active" id="data-collection-tab">
+                        <div class="settings-section">
+                            <div class="section-title">Data Collection Options</div>
+
+                            <div class="setting-item">
+                                <label class="setting-label">Video Metadata</label>
+                                <div class="setting-description">Download video and extract metadata (views, likes, etc.)</div>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="metadata-enabled"
+                                           data-section="data_collection" data-key="metadata" checked>
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+
+                            <div class="setting-item">
+                                <label class="setting-label">Transcription</label>
+                                <div class="setting-description">Extract audio and transcribe using Whisper AI</div>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="transcription-enabled"
+                                           data-section="data_collection" data-key="transcription" checked>
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+
+                            <div class="setting-item">
+                                <label class="setting-label">Comments</label>
+                                <div class="setting-description">Extract comments (requires MS_TOKEN)</div>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="comments-enabled"
+                                           data-section="data_collection" data-key="comments">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+
+                            <div class="setting-item">
+                                <label class="setting-label">Hashtags</label>
+                                <div class="setting-description">Extract and normalize hashtags from titles/descriptions</div>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="hashtags-enabled"
+                                           data-section="data_collection" data-key="hashtags" checked>
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+
+                            <div class="setting-item">
+                                <label class="setting-label">OCR Text</label>
+                                <div class="setting-description">Extract on-screen text from video frames using OCR</div>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="ocr-enabled"
+                                           data-section="data_collection" data-key="ocr_text" checked>
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+
+                            <div class="setting-item">
+                                <label class="setting-label">Context Identification</label>
+                                <div class="setting-description">Identify content categories using AI analysis of transcripts</div>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="context-enabled"
+                                           data-section="data_collection" data-key="context_identification" checked>
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Database Settings -->
-                    <div class="tab-pane fade show active" id="database-tab">
+                    <div class="tab-pane fade" id="database-tab">
                         <div class="settings-section">
                             <div class="section-title">Database Connection</div>
 
@@ -924,45 +1071,21 @@
                                        data-section="ml" data-key="training_threshold"
                                        placeholder="100" min="10" max="1000">
                             </div>
-                        </div>
-                    </div>
-
-                    <!-- Auto-scaling Settings -->
-                    <div class="tab-pane fade" id="autoscale-tab">
-                        <div class="settings-section">
-                            <div class="section-title">Auto-Scaling Configuration</div>
 
                             <div class="setting-item">
-                                <label class="setting-label">Scaling Mode</label>
-                                <select class="setting-control" id="scaling-mode"
-                                        data-section="autoscale" data-key="mode">
-                                    <option value="auto">Automatic</option>
-                                    <option value="manual">Manual Control</option>
-                                    <option value="scheduled">Scheduled</option>
-                                </select>
+                                <label class="setting-label">Minimum Duration</label>
+                                <div class="setting-description">Minimum video duration for ML training (seconds)</div>
+                                <input type="number" class="setting-control" id="min-duration"
+                                       data-section="ml" data-key="min_duration"
+                                       placeholder="45" min="1" max="600">
                             </div>
 
                             <div class="setting-item">
-                                <label class="setting-label">Idle Timeout</label>
-                                <div class="setting-description">Minutes before stopping idle collector</div>
-                                <input type="number" class="setting-control" id="idle-timeout"
-                                       data-section="autoscale" data-key="idle_timeout"
-                                       placeholder="5" min="1" max="60">
-                            </div>
-
-                            <div class="setting-item">
-                                <label class="setting-label">Scale-Up Threshold</label>
-                                <div class="setting-description">Queue size to trigger more workers</div>
-                                <input type="number" class="setting-control" id="scale-up"
-                                       data-section="autoscale" data-key="scale_up_threshold"
-                                       placeholder="10" min="1" max="100">
-                            </div>
-
-                            <div class="setting-item">
-                                <label class="setting-label">Max Workers</label>
-                                <input type="number" class="setting-control" id="max-workers"
-                                       data-section="autoscale" data-key="max_workers"
-                                       placeholder="8" min="1" max="32">
+                                <label class="setting-label">Minimum Words</label>
+                                <div class="setting-description">Minimum transcript words for ML training</div>
+                                <input type="number" class="setting-control" id="min-words"
+                                       data-section="ml" data-key="min_words"
+                                       placeholder="150" min="10" max="5000">
                             </div>
                         </div>
                     </div>
@@ -979,128 +1102,6 @@
                         <i class="fas fa-check-circle"></i> Saved!
                     </span>
                 </div>
-            </div>
-        </div>
-
-        <!-- Original Stats Grid -->
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-label">Collector Status</div>
-                <div class="stat-value" id="collector-status-old">
-                    {% if collector_running %}
-                        <span class="status-indicator status-running"></span>Running
-                    {% else %}
-                        <span class="status-indicator status-stopped"></span>Stopped
-                    {% endif %}
-                </div>
-            </div>
-
-            <div class="stat-card">
-                <div class="stat-label">ML Training Status</div>
-                <div class="stat-value" id="ml-training-status">
-                    <span class="status-indicator status-stopped"></span>Idle
-                </div>
-            </div>
-
-            <div class="stat-card">
-                <div class="stat-label">Last Collector Run</div>
-                <div class="stat-value date-value" id="last-collector-run">
-                    {% if last_collector_date %}
-                        {{ last_collector_date|date:"M d, H:i" }}
-                    {% else %}
-                        <span class="no-data">Never</span>
-                    {% endif %}
-                </div>
-            </div>
-
-            <div class="stat-card">
-                <div class="stat-label">Last ML Training</div>
-                <div class="stat-value date-value" id="last-ml-training">
-                    {% if last_ml_date %}
-                        {{ last_ml_date|date:"M d, H:i" }}
-                    {% else %}
-                        <span class="no-data">Never</span>
-                    {% endif %}
-                </div>
-            </div>
-
-            <div class="stat-card">
-                <div class="stat-label">Total Videos</div>
-                <div class="stat-value" id="total-videos">{{ video_count|floatformat:0 }}</div>
-            </div>
-
-            <div class="stat-card">
-                <div class="stat-label">Total URLs Collected</div>
-                <div class="stat-value" id="total-urls">{{ url_count|floatformat:0 }}</div>
-            </div>
-
-            <div class="stat-card">
-                <div class="stat-label">Last Run URLs Processed</div>
-                <div class="stat-value" id="last-run-urls">{{ last_run_urls_processed|floatformat:0 }}</div>
-            </div>
-        </div>
-
-        <div class="url-stats">
-            <h2>📊 URL Processing Status</h2>
-            <div class="url-breakdown">
-                <div class="url-stat">
-                    <div class="url-count" id="pending-count">{{ pending_urls }}</div>
-                    <div class="url-label">Pending</div>
-                </div>
-                <div class="url-stat">
-                    <div class="url-count" id="processing-count">0</div>
-                    <div class="url-label">Processing</div>
-                </div>
-                <div class="url-stat">
-                    <div class="url-count" id="completed-count">{{ completed_urls }}</div>
-                    <div class="url-label">Completed</div>
-                </div>
-                <div class="url-stat">
-                    <div class="url-count" id="failed-count">{{ failed_urls }}</div>
-                    <div class="url-label">Failed</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="ml-results">
-            <h2>🧠 ML Test Results</h2>
-
-            <div class="ml-metrics-grid">
-                <div class="ml-metric-card">
-                    <div class="metric-label">Model Effectiveness</div>
-                    <div class="metric-value" id="ml-effectiveness">--</div>
-                    <div class="metric-change" id="ml-change"></div>
-                </div>
-                <div class="ml-metric-card">
-                    <div class="metric-label">R² Score</div>
-                    <div class="metric-value" id="ml-r2">--</div>
-                    <div class="metric-change" id="ml-r2-change"></div>
-                </div>
-                <div class="ml-metric-card">
-                    <div class="metric-label">MAE</div>
-                    <div class="metric-value" id="ml-mae">--</div>
-                    <div class="metric-change" id="ml-mae-change"></div>
-                </div>
-                <div class="ml-metric-card">
-                    <div class="metric-label">RMSE</div>
-                    <div class="metric-value" id="ml-rmse">--</div>
-                    <div class="metric-change" id="ml-rmse-change"></div>
-                </div>
-            </div>
-
-            <div class="ml-tabs">
-                <button class="ml-tab active" onclick="showMLTab('predictions')">Sample Predictions</button>
-                <button class="ml-tab" onclick="showMLTab('history')">Performance History</button>
-            </div>
-
-            <div class="ml-tab-content" id="predictions-tab">
-                <div class="test-predictions" id="test-predictions">
-                    <p class="no-data">No test predictions available yet</p>
-                </div>
-            </div>
-
-            <div class="ml-tab-content" id="history-tab" style="display: none;">
-                <canvas id="ml-performance-chart"></canvas>
             </div>
         </div>
 
@@ -1219,9 +1220,6 @@
 
         // Control services
         async function controlService(service, action) {
-            const spinner = document.getElementById(`${service}-spinner`);
-            spinner.classList.add('show');
-
             try {
                 const response = await fetch(`/api/services/${service}/${action}/`, {
                     method: 'POST',
@@ -1233,13 +1231,10 @@
                 if (response.ok) {
                     // Update status after a moment
                     setTimeout(updateServiceStatus, 1000);
+                    setTimeout(updateDashboard, 1500);
                 }
             } catch (error) {
                 console.error(`Error controlling ${service}:`, error);
-            } finally {
-                setTimeout(() => {
-                    spinner.classList.remove('show');
-                }, 1000);
             }
         }
 

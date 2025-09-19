@@ -319,29 +319,57 @@ class VideoExtractor:
         else:
             # Use TranscriptExtractor with progress callback
             if not self.transcript_extractor:
+                # Check config for whether to use OpenAI Whisper
+                use_openai_whisper = False
+                try:
+                    import toml
+                    with open('config.toml', 'r') as f:
+                        config = toml.load(f)
+                        # Use OpenAI Whisper if explicitly configured
+                        use_openai_whisper = config.get('download', {}).get('use_openai_whisper', False)
+                except:
+                    pass
+
                 self.transcript_extractor = TranscriptExtractor(
                     device=device.lower(),
-                    shutdown_event=self.shutdown_event
+                    shutdown_event=self.shutdown_event,
+                    use_openai_whisper=use_openai_whisper
                 )
             return self.transcript_extractor.extract_transcript(str(video_path), progress_callback)
     
     def _sanitize_filename(self, filename: str) -> str:
         """Sanitize filename for filesystem compatibility."""
+        # Universal invalid characters (safe for all filesystems including Docker)
+        # Include # to prevent hashtag issues
+        invalid_chars = '<>:"/\\|?*\x00#'
+
+        # Additional problematic sequences
+        problematic_patterns = [
+            ('||', '_'),  # Double pipes
+            ('...', '_'), # Triple dots
+            ('  ', ' '),  # Multiple spaces to single
+        ]
+
+        # Apply pattern replacements first
+        for pattern, replacement in problematic_patterns:
+            filename = filename.replace(pattern, replacement)
+
         # Remove invalid characters
-        if platform.system() == 'Windows':
-            invalid_chars = '<>:"/\\|?*'
-            max_length = 200
-        else:
-            invalid_chars = '/'
-            max_length = 255
-        
         for char in invalid_chars:
             filename = filename.replace(char, '_')
-        
-        # Remove control characters
+
+        # Remove control characters (anything below ASCII 32)
         filename = ''.join(char for char in filename if ord(char) >= 32)
-        
-        # Trim to max length
+
+        # Remove leading/trailing dots and spaces (problematic on Windows)
+        filename = filename.strip('. ')
+
+        # Ensure filename isn't empty
+        if not filename:
+            filename = "untitled"
+
+        # Cross-platform safe length
+        max_length = 200
         return filename[:max_length].strip()
     
     def cleanup(self):

@@ -12,6 +12,7 @@ import logging
 import os
 import subprocess
 from datetime import datetime
+from django.utils import timezone
 import toml
 import signal
 import time
@@ -300,10 +301,11 @@ class CollectorCompleteView(View):
     def post(self, request):
         """Collector completion notification"""
         try:
+            from django.utils import timezone
             data = json.loads(request.body)
             urls_processed = data.get('urls_processed', 0)
             started_at = data.get('started_at')
-            stopped_at = data.get('stopped_at', datetime.now().isoformat())
+            stopped_at = data.get('stopped_at', timezone.now().isoformat())
             reason = data.get('reason', 'idle_timeout')
             
             # Log collector completion with clear visual indicator
@@ -329,7 +331,6 @@ class CollectorCompleteView(View):
             
             # Create CollectorRun record for dashboard
             try:
-                from django.utils import timezone
                 CollectorRun.objects.create(
                     started_at=datetime.fromisoformat(started_at) if started_at else timezone.now(),
                     ended_at=datetime.fromisoformat(stopped_at) if stopped_at else timezone.now(),
@@ -437,7 +438,7 @@ class MLTrainingStartView(View):
             training_run = MLTrainingRun.objects.create(
                 model_name='snoo',
                 status='running',
-                trained_at=datetime.now()
+                trained_at=timezone.now()
             )
             
             logger.info("🎯 ML training started signal received")
@@ -487,7 +488,7 @@ class MLTrainingEndView(View):
                 training_run = MLTrainingRun.objects.create(
                     model_name='snoo',
                     status='completed',
-                    trained_at=datetime.now(),
+                    trained_at=timezone.now(),
                     r2_score=metrics.get('r2_score'),
                     mae=metrics.get('mae'),
                     rmse=metrics.get('rmse'),
@@ -868,39 +869,27 @@ class CollectorStartView(APIView):
     def post(self, request):
         """Start the collector"""
         try:
-            # Check if running in Docker
-            if os.environ.get('DOCKER_CONTAINER') and DOCKER_AVAILABLE:
-                # Use Docker API to start container
-                client = docker.from_env()
-                try:
-                    container = client.containers.get('tiktok_scraper_collector')
-                    if container.status != 'running':
-                        container.start()
-                        logger.info("Started collector container")
-                    return Response({'success': True, 'mode': 'docker'})
-                except docker.errors.NotFound:
-                    # Create and start container
-                    subprocess.run(['docker-compose', 'up', '-d', 'collector'],
-                                 cwd=settings.BASE_DIR)
-                    return Response({'success': True, 'mode': 'docker-compose'})
-            else:
-                # Start collector process directly
-                venv_python = os.path.join(settings.BASE_DIR, 'venv', 'bin', 'python')
-                process = subprocess.Popen(
-                    [venv_python, 'collector.py', '--from-queue'],
-                    cwd=settings.BASE_DIR
-                )
+            # Import and use BackgroundTaskManager
+            from .background_tasks import task_manager
 
+            # Start collector with dynamic worker count from config
+            result = task_manager.start_collector()
+
+            if result.get('success'):
                 # Store process info
                 CollectorRun.objects.create(
-                    started_at=datetime.now(),
+                    started_at=timezone.now(),
                     status='running'
                 )
 
                 return Response({
                     'success': True,
-                    'pid': process.pid,
-                    'mode': 'local'
+                    'message': result.get('message', 'Collector started successfully')
+                })
+            else:
+                return Response({
+                    'success': False,
+                    'message': result.get('message', 'Collector is already running or failed to start')
                 })
 
         except Exception as e:
@@ -916,29 +905,27 @@ class CollectorStopView(APIView):
     def post(self, request):
         """Stop the collector"""
         try:
-            if os.environ.get('DOCKER_CONTAINER') and DOCKER_AVAILABLE:
-                # Stop Docker container
-                client = docker.from_env()
-                try:
-                    container = client.containers.get('tiktok_scraper_collector')
-                    container.stop()
-                    return Response({'success': True, 'mode': 'docker'})
-                except docker.errors.NotFound:
-                    return Response({'success': True, 'message': 'Container not running'})
-            else:
-                # Stop local process
-                result = subprocess.run(['pkill', '-f', 'collector.py'],
-                                      capture_output=True)
+            # Import and use BackgroundTaskManager
+            from .background_tasks import task_manager
 
+            # Stop collector gracefully
+            success = task_manager.stop_collector()
+
+            if success:
                 # Update status
                 CollectorRun.objects.filter(status='running').update(
                     status='stopped',
-                    ended_at=datetime.now()
+                    ended_at=timezone.now()
                 )
 
                 return Response({
                     'success': True,
-                    'mode': 'local'
+                    'message': 'Collector stopped successfully'
+                })
+            else:
+                return Response({
+                    'success': False,
+                    'message': 'Failed to stop collector'
                 })
 
         except Exception as e:
@@ -983,21 +970,17 @@ class CollectorStatusView(APIView):
     def get(self, request):
         """Get collector status"""
         try:
-            status_info = CollectorService.get_collector_stats()
+            # Import and use BackgroundTaskManager
+            from .background_tasks import task_manager
 
-            # Add container info if in Docker
-            if os.environ.get('DOCKER_CONTAINER') and DOCKER_AVAILABLE:
-                try:
-                    client = docker.from_env()
-                    container = client.containers.get('tiktok_scraper_collector')
-                    status_info['container'] = {
-                        'id': container.short_id,
-                        'status': container.status,
-                        'created': container.attrs['Created'],
-                        'state': container.attrs['State']
-                    }
-                except:
-                    pass
+            # Get process status from task manager
+            process_status = task_manager.get_status()
+
+            status_info = {
+                'status': 'running' if process_status['collector']['running'] else 'stopped',
+                'pid': process_status['collector']['pid'],
+                'collector_running': process_status['collector']['running']
+            }
 
             return Response(status_info)
 
@@ -1014,24 +997,29 @@ class MLServiceStartView(APIView):
     def post(self, request):
         """Start ML training"""
         try:
-            # Run ML training
-            venv_python = os.path.join(settings.BASE_DIR, 'venv', 'bin', 'python')
-            process = subprocess.Popen(
-                [venv_python, 'ml/train_ml.py', 'train'],
-                cwd=settings.BASE_DIR
-            )
+            # Import and use BackgroundTaskManager
+            from .background_tasks import task_manager
 
-            # Create training run record
-            MLTrainingRun.objects.create(
-                model_name='TikTokPerformancePredictor',
-                status='running',
-                trained_at=datetime.now()
-            )
+            # Start ML training
+            success = task_manager.start_ml_training()
 
-            return Response({
-                'success': True,
-                'pid': process.pid
-            })
+            if success:
+                # Create training run record
+                MLTrainingRun.objects.create(
+                    model_name='TikTokPerformancePredictor',
+                    status='running',
+                    trained_at=timezone.now()
+                )
+
+                return Response({
+                    'success': True,
+                    'message': 'ML training started successfully'
+                })
+            else:
+                return Response({
+                    'success': False,
+                    'message': 'ML training is already running or failed to start'
+                })
 
         except Exception as e:
             logger.error(f"Error starting ML training: {e}")

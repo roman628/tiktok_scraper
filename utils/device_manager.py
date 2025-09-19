@@ -12,43 +12,72 @@ class DeviceManager:
     _device_checked: bool = False
     
     @classmethod
-    def get_best_device(cls, force_cpu: bool = False) -> str:
+    def get_best_device(cls, force_cpu: bool = False, require_gpu: bool = True) -> str:
         """
         Get the best available device for ML operations.
-        
+
         Priority:
         1. CUDA (NVIDIA GPU)
         2. MPS (Apple Silicon GPU)
-        3. CPU
-        
+        3. CPU (only if require_gpu=False)
+
         Args:
             force_cpu: Force CPU usage even if GPU is available
-            
+            require_gpu: If True, raise error if no GPU available (default: True)
+
         Returns:
             Device string: 'cuda', 'mps', or 'cpu'
+
+        Raises:
+            RuntimeError: If require_gpu=True and no GPU is available
         """
         if force_cpu:
             return 'cpu'
-        
+
         # Use cached result if available
         if cls._device_checked and cls._cached_device:
+            if require_gpu and cls._cached_device == 'cpu':
+                raise RuntimeError(
+                    "GPU is required but not available. "
+                    "Please ensure CUDA or MPS is properly configured. "
+                    "nvidia-smi shows: " + str(cls.check_nvidia_smi())
+                )
             return cls._cached_device
-        
+
         # Check for CUDA (NVIDIA GPU)
         if torch.cuda.is_available():
             cls._cached_device = 'cuda'
             cls._device_checked = True
             print("✓ NVIDIA GPU detected (CUDA)")
             return 'cuda'
-        
+
         # Check for MPS (Apple Silicon GPU)
         if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
             cls._cached_device = 'mps'
             cls._device_checked = True
             print("✓ Apple Silicon GPU detected (MPS)")
             return 'mps'
-        
-        # Fallback to CPU
+
+        # No GPU found
+        if require_gpu:
+            # Check if nvidia-smi works (might indicate configuration issue)
+            nvidia_available = cls.check_nvidia_smi()
+            error_msg = (
+                "❌ GPU is required but not available.\n"
+                f"  CUDA available: {torch.cuda.is_available()}\n"
+                f"  nvidia-smi available: {nvidia_available}\n"
+            )
+            if nvidia_available:
+                error_msg += (
+                    "  nvidia-smi detects GPU but PyTorch cannot access it.\n"
+                    "  This may be a driver/CUDA version mismatch or Docker configuration issue.\n"
+                )
+            else:
+                error_msg += "  No NVIDIA GPU detected on this system.\n"
+
+            raise RuntimeError(error_msg)
+
+        # Fallback to CPU only if allowed
         cls._cached_device = 'cpu'
         cls._device_checked = True
         print("ℹ Using CPU (no GPU detected)")

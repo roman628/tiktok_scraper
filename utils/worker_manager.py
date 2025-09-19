@@ -203,37 +203,14 @@ class WorkerManager:
                 
         return dead_workers
     
-    def detect_completion(self, workers: List[mp.Process]) -> bool:
-        """Detect if all workers have completed using multiple signals"""
-        # Check database for completion status
-        completed_in_db = self.get_completed_worker_count()
-        
-        # Check process alive status
-        alive_processes = sum(1 for w in workers if w.is_alive())
-        
-        # Check worker health
-        worker_health = self.check_worker_health()
-        active_workers = sum(1 for status in worker_health.values() 
-                            if status in ['active', 'starting', 'idle'])
-        
-        # Workers are done if:
-        # 1. All marked complete in database, OR
-        # 2. No processes alive, OR  
-        # 3. All workers idle/dead for extended period
-        all_complete = completed_in_db >= self.worker_count
-        all_dead = alive_processes == 0
-        all_idle = active_workers == 0 and len(worker_health) > 0
-        
-        return all_complete or (all_dead and all_idle)
-    
     def mark_worker_complete(self, worker_id: int):
         """Mark a worker as complete in the database"""
         try:
             with self.get_db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
-                        UPDATE worker_status 
-                        SET status = 'completed', 
+                        UPDATE worker_status
+                        SET status = 'completed',
                             completed_at = NOW(),
                             current_url = NULL
                         WHERE worker_id = %s
